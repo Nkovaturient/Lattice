@@ -1,0 +1,32 @@
+{
+  "name": "lattice",
+  "version": "1.0.0",
+  "description": "**Private solver mesh. Intents settled before the chain sees them.**",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Neha Kumari",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@chainsafe/libp2p-gossipsub": "^14.1.2",
+    "@chainsafe/libp2p-noise": "^17.0.0",
+    "@libp2p/circuit-relay-v2": "^4.1.6",
+    "@libp2p/identify": "^4.0.13",
+    "@libp2p/kad-dht": "^16.1.6",
+    "@libp2p/mdns": "^12.0.14",
+    "@libp2p/ping": "^3.0.13",
+    "@libp2p/webrtc": "^6.0.14",
+    "@libp2p/websockets": "^10.1.6",
+    "@libp2p/yamux": "^8.0.1",
+    "ethers": "^6.16.0",
+    "libp2p": "^3.1.6",
+    "protobufjs": "^8.0.0"
+  }
+}

@@ -1,0 +1,36 @@
+syntax = "proto3";
+package defi;
+
+// ── Intent ────────────────────────────────────────────────────────────────────
+// Gossip wire format — published by user nodes, propagated via GossipSub.
+// All EVM addresses: 20 bytes. All uint256 values: 32 bytes big-endian.
+// Signed via EIP-712 — signature field is standard 65-byte v,r,s.
+
+message Intent {
+  bytes   intent_id         = 1;   // 32 bytes — keccak256(EIP-712 hash)
+  bytes   user              = 2;   // 20 bytes — signer / payer address
+  uint64  nonce             = 3;   // per-user, incremented on settlement
+  bytes   input_token       = 4;   // 20 bytes — address(0) = native ETH
+  bytes   output_token      = 5;   // 20 bytes
+  bytes   input_amount      = 6;   // 32 bytes — uint256, exact amount in
+  bytes   min_output_amount = 7;   // 32 bytes — uint256, slippage floor
+  bytes   recipient         = 8;   // 20 bytes — output destination
+  uint64  deadline          = 9;   // unix timestamp — hard on-chain expiry
+  uint32  topic_tier        = 10;  // 0 = public, 1 = tier-1 solvers only
+  bytes   preferred_solver  = 11;  // 20 bytes — address(0) = open auction
+  bytes   signature         = 12;  // 65 bytes — EIP-712 sig over fields 2–11
+}
+
+// ── Bid ───────────────────────────────────────────────────────────────────────
+// RFQ stream format — written by solver nodes back to the coordinator
+// over a /defi/rfq/1.0.0 yamux stream. Never gossiped publicly.
+// Signed via EIP-712 — verified by IntentSettlement.sol on-chain.
+
+message Bid {
+  bytes   intent_id     = 1;   // 32 bytes — back-reference to the Intent
+  bytes   solver        = 2;   // 20 bytes — solver's EVM address
+  bytes   output_amount = 3;   // 32 bytes — uint256, guaranteed output
+  bytes   route         = 4;   // variable — ABI-encoded Uniswap v3 path
+  uint64  deadline      = 5;   // must be <= Intent.deadline
+  bytes   signature     = 6;   // 65 bytes — EIP-712 sig over fields 1–5
+}
