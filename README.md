@@ -1,6 +1,6 @@
 # Lattice
 
-**Decentralized solver mesh. Intents settled before the chain sees them.**
+**Private solver mesh. Intents settled before the chain sees them.**
 
 Lattice is an intent-based DeFi coordination layer built on js-libp2p. Users sign what they want. Solvers compete privately to fill it. The best solution lands on-chain. No mempool exposure. No MEV leak. No trusted relayer.
 
