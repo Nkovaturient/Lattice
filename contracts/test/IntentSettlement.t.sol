@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.34;
 
 import "forge-std/Test.sol";
 import "../src/IntentTypes.sol";
@@ -29,37 +29,47 @@ contract MockERC20 {
     }
 }
 
-// SwapRouter stub — returns minOutputAmount + 10% bonus to simulate real swap
+interface ISwapRouterTest {
+    struct ExactInputParams {
+        bytes path;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+    }
+}
+
+// SwapRouter stub — mints output to recipient (simulates swap); returns min + 10%
 contract MockSwapRouter {
-    function exactInput(ISwapRouter.ExactInputParams calldata p)
-        external payable returns (uint256) {
-        // Uniswap v3 path: tokenIn (20 bytes) + fee (3) + … — touch first token
-        require(p.path.length >= 20, "path");
-        address tokenIn = address(uint160(bytes20(p.path[0:20])));
-        (bool ok,) = tokenIn.call(""); ok;
-        // Return 10% above minimum to simulate surplus for solver fee
+    function exactInput(ISwapRouterTest.ExactInputParams calldata p)
+        external
+        payable
+        returns (uint256)
+    {
+        require(p.path.length >= 43, "path");
         uint256 out = p.amountOutMinimum * 110 / 100;
+        address tokenOut = address(uint160(bytes20(p.path[p.path.length - 20:])));
+        MockERC20(tokenOut).mint(p.recipient, out);
         return out;
     }
 }
 
 contract IntentSettlementTest is Test {
-    SolverRegistry  registry;
+    SolverRegistry registry;
     IntentSettlement settlement;
-    MockERC20       usdc;
-    MockERC20       weth;
+    MockERC20 usdc;
+    MockERC20 weth;
 
-    address user   = makeAddr("user");
+    address treasury = makeAddr("treasury");
+    address user = makeAddr("user");
     address solver = makeAddr("solver");
     uint256 userPK;
     uint256 solverPK;
 
     function setUp() public {
-        // Circular dep: Registry needs settlement addr; Settlement needs registry.
-        // Predict the next CREATE address so Registry can be wired to the Settlement we deploy second.
         uint64 n = vm.getNonce(address(this));
         address predictedSettlement = vm.computeCreateAddress(address(this), uint256(n) + 1);
-        registry = new SolverRegistry(predictedSettlement);
+        registry = new SolverRegistry(predictedSettlement, treasury);
         settlement = new IntentSettlement(address(registry));
         assertEq(address(settlement), predictedSettlement);
 
@@ -75,10 +85,10 @@ contract IntentSettlementTest is Test {
         usdc.mint(user,   1_000_000_000);     // 1000 USDC
         weth.mint(address(settlement), 1e18); // seed settlement with WETH
 
-        // Register solver
+        // Register solver (tier 0 — tier 1 requires fill history)
         vm.deal(solver, 1 ether);
         vm.startPrank(solver);
-        registry.register{value: registry.MIN_STAKE()}("12D3KooWTestPeerId", 1);
+        registry.register{value: registry.MIN_STAKE()}("12D3KooWTestPeerId", 0);
         vm.stopPrank();
     }
 
@@ -87,7 +97,7 @@ contract IntentSettlementTest is Test {
     function test_SolverRegistration() public view {
         assertTrue(registry.isRegistered(solver));
         assertTrue(registry.isActiveAndStaked(solver));
-        assertEq(registry.solverTier(solver), 1);
+        assertEq(registry.solverTier(solver), 0);
         assertEq(registry.peerIdToAddress("12D3KooWTestPeerId"), solver);
     }
 
@@ -141,24 +151,74 @@ contract IntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
     }
 
-    function test_CannotSettleTwice() public  view {
-        // Only tests the replay check — full settlement needs mock SwapRouter
-        // Verify settled mapping starts false
+    function test_RevertIfBidDeadlinePastIntent() public {
         IntentTypes.Intent memory intent = _makeIntent();
-        bytes32 intentId = keccak256(abi.encodePacked(
-            "\x19\x01",
-            settlement.DOMAIN_SEPARATOR(),
-            IntentTypes.hashIntent(intent)
-        ));
-        assertFalse(settlement.settled(intentId), "Should not be settled yet");
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.deadline = intent.deadline + 1;
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+        bytes memory iSig = _signIntent(intent, userPK);
+
+        vm.prank(solver);
+        vm.expectRevert("Bid extends past intent");
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_RevertIfNativeInputToken() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        intent.inputToken = address(0);
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        vm.expectRevert("ERC20 only");
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_SweepSlashedFunds_OnlyTreasury() public {
+        vm.prank(solver);
+        vm.expectRevert("Only treasury");
+        registry.sweepSlashedFunds();
+    }
+
+    function test_CannotSettleTwice() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.outputAmount = 500_000_000_000_000_000;
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        vm.prank(solver);
+        vm.expectRevert("Intent already settled");
+        settlement.settle(intent, iSig, bid, bSig);
     }
 
     function test_SolverSlash() public {
         uint256 stakeBefore = registry.stake(solver);
+        uint256 balBefore = solver.balance;
         vm.prank(address(settlement));
         registry.slash(solver, "overpromise");
-        uint256 stakeAfter = registry.stake(solver);
-        assertEq(stakeBefore - stakeAfter, registry.SLASH_AMOUNT());
+        // Tier-0 min 0.05 ETH; after 0.01 slash, 0.04 < 0.05 → auto-deregister + residual returned
+        assertFalse(registry.isRegistered(solver));
+        assertEq(registry.stake(solver), 0);
+        assertEq(stakeBefore - registry.SLASH_AMOUNT(), solver.balance - balBefore);
+        assertEq(registry.slashProceedsBalance(), registry.SLASH_AMOUNT());
+        uint256 tBefore = treasury.balance;
+        vm.prank(treasury);
+        registry.sweepSlashedFunds();
+        assertEq(treasury.balance - tBefore, registry.SLASH_AMOUNT());
+        assertEq(registry.slashProceedsBalance(), 0);
     }
 
     function test_SolverDeregister() public {
@@ -173,9 +233,127 @@ contract IntentSettlementTest is Test {
     function test_FuzzIntentHash(address u, uint256 amt) public pure {
         vm.assume(u != address(0) && amt > 0 && amt < 1e30);
         IntentTypes.Intent memory i;
-        i.user = u; i.inputAmount = amt; i.deadline = 9999999999;
+        i.user = u;
+        i.inputAmount = amt;
+        i.deadline = 9999999999;
         bytes32 h = IntentTypes.hashIntent(i);
         assertTrue(h != bytes32(0));
+    }
+
+    function test_RevertIfNotPreferredSolver() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        intent.preferredSolver = makeAddr("otherSolver");
+
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        vm.expectRevert("Not preferred solver");
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_RevertIfTopicTierMismatch() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        intent.topicTier = 1;
+
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        vm.expectRevert("Tier mismatch");
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_SettleRecordsOutputAndSlashForOverpromise() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.outputAmount = 500_000_000_000_000_000;
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        bytes32 intentId = keccak256(
+            abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), IntentTypes.hashIntent(intent))
+        );
+        assertTrue(settlement.settled(intentId));
+        uint256 recorded = settlement.settlementActualOutput(intentId);
+        assertGt(recorded, 0);
+
+        IntentTypes.Bid memory noSlashBid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        noSlashBid.outputAmount = recorded;
+        bytes memory noSlashSig = _signBid(noSlashBid, solverPK);
+        vm.expectRevert("No overpromise to slash");
+        settlement.slashForOverpromise(noSlashBid, noSlashSig);
+
+        IntentTypes.Bid memory slashBid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        slashBid.outputAmount = recorded + 1;
+        bytes memory slashSig = _signBid(slashBid, solverPK);
+
+        uint256 stakeBefore = registry.stake(solver);
+        settlement.slashForOverpromise(slashBid, slashSig);
+        assertLt(registry.stake(solver), stakeBefore);
+    }
+
+    function test_SlashForOverpromise_AfterPriorSlashAutoDeregister() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.outputAmount = 500_000_000_000_000_000;
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        uint256 recorded = settlement.settlementActualOutput(
+            keccak256(
+                abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), IntentTypes.hashIntent(intent))
+            )
+        );
+
+        vm.prank(address(settlement));
+        registry.slash(solver, "prior");
+        assertFalse(registry.isRegistered(solver));
+
+        (, , , , uint256 slashesAfterPrior,) = registry.solvers(solver);
+        assertEq(slashesAfterPrior, 1);
+
+        uint256 proceedsBefore = registry.slashProceedsBalance();
+
+        IntentTypes.Bid memory slashBid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        slashBid.outputAmount = recorded + 1;
+        bytes memory slashSig = _signBid(slashBid, solverPK);
+
+        settlement.slashForOverpromise(slashBid, slashSig);
+
+        (, , , , uint256 slashesAfterOverpromise,) = registry.solvers(solver);
+        assertEq(slashesAfterOverpromise, slashesAfterPrior + 1);
+        assertEq(registry.slashProceedsBalance(), proceedsBefore);
+    }
+
+    function test_SlashOverpromise_RevertNoSolverHistory() public {
+        vm.prank(address(settlement));
+        vm.expectRevert("No solver history");
+        registry.slashOverpromise(makeAddr("random"));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────

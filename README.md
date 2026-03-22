@@ -115,7 +115,7 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 | Pub/sub | GossipSub |
 | Wire format | Protobuf (protobufjs) |
 | EVM signing | ethers v6 (EIP-712) |
-| Smart contracts | Solidity ^0.8.24 |
+| Smart contracts | Solidity 0.8.34  |
 | Runtime | Node.js 20+ (ESM) |
 
 ---

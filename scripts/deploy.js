@@ -73,12 +73,10 @@ async function main() {
     console.warn('  warn: low balance — may run out of gas')
   }
 
-  // ── 1. Deploy SolverRegistry (needs settlement address — use zero for now) ─
+  // ── 1. Deploy SolverRegistry(predictedSettlement, treasury) then IntentSettlement
   console.log('\n[1/2] Deploying SolverRegistry...')
-  // In production with hardhat:
-  //   const Registry = await ethers.getContractFactory('SolverRegistry')
-  //   const registry = await Registry.deploy(SETTLEMENT_ADDRESS)
-  //   await registry.waitForDeployment()
+  // Match Foundry script: predict settlement address, treasury = deployer (or multisig).
+  //   const registry = await Registry.deploy(predictedSettlement, treasuryAddress)
   console.log('  → compile with: npx hardhat compile')
   console.log('  → deploy with:  npx hardhat run scripts/deploy.js --network sepolia')
 

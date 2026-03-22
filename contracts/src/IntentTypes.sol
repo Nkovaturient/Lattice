@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.34;
 
 // Track 4.1 — EIP-712 type definitions shared across all Gossamer contracts.
 // TYPEHASH values must mirror domain.js INTENT_TYPE and BID_TYPE exactly —
@@ -21,7 +21,8 @@ library IntentTypes {
     struct Intent {
         address user;
         uint256 nonce;
-        address inputToken;         // address(0) = native ETH
+        /// @dev ERC20 only on-chain in v1; use WETH (or chain-native wrapped ETH) for ETH legs — `IntentSettlement` reverts if zero.
+        address inputToken;
         address outputToken;
         uint256 inputAmount;        // exact amount in — no partial fills
         uint256 minOutputAmount;    // slippage floor
@@ -36,7 +37,7 @@ library IntentTypes {
         address solver;
         uint256 outputAmount;       // guaranteed output amount
         bytes   route;              // ABI-encoded Uniswap v3 path
-        uint64  deadline;           // must be <= Intent.deadline
+        uint64  deadline;           // must be <= Intent.deadline (enforced in IntentSettlement)
     }
 
     // ── Hashing ───────────────────────────────────────────────────────────────

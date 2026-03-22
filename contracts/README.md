@@ -74,15 +74,16 @@ Solidity contracts powering on-chain settlement, solver registration, and slashi
 | Contract | Purpose |
 |---|---|
 | `IntentTypes.sol` | EIP-712 type library shared by all contracts |
-| `SolverRegistry.sol` | Solver stake, register, slash — p2p trust anchor |
+| `SolverRegistry.sol` | Solver stake, register, slash, **`treasury` + `sweepSlashedFunds()`** — p2p trust anchor |
 | `IntentSettlement.sol` | Verify sigs, execute Uniswap v3 swap, pay solver |
 
 ---
 
 ## Tech Stack
 
-- **Solidity** `^0.8.24`
-- **Foundry** — build, test, deploy
+- **Solidity** `0.8.34` (pinned in `src` / `test` / `script`; `foundry.toml` `solc` matches)
+- **Foundry** — build, test, deploy (`via_ir = true` in `foundry.toml` for `IntentSettlement.settle` stack limits)
+- **OpenZeppelin Contracts v5** — `SafeERC20`, `ReentrancyGuard` (`lib/openzeppelin-contracts`, remapped as `@openzeppelin/contracts/`)
 - **Uniswap v3 SwapRouter** — `0xE592427A0AEce92De3Edee1F18E0157C05861564` (same address on all EVM chains)
 
 ---
@@ -132,8 +133,9 @@ cd foundry
 # Install Foundry (if not installed)
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 
-# Install forge-std dependency
-forge install foundry-rs/forge-std --no-commit
+# Dependencies (forge-std + OpenZeppelin; skip if already in lib/)
+forge install foundry-rs/forge-std
+forge install OpenZeppelin/openzeppelin-contracts@v5.0.2
 
 # Build
 forge build
@@ -265,7 +267,14 @@ BID_TYPEHASH    = 0x2e1aa209d8a4134c9a8e7fe708d82167eaf3ac87abb2c5a79b7dae3708ae
 ## Security Notes
 
 - `SolverRegistry.settlementContract` is `immutable` — changing it requires redeployment
-- `slash()` is callable only by `IntentSettlement` — no admin grief vector
-- `settle()` uses per-user nonces — no replay attacks
-- `slashForOverpromise()` is callable by anyone — decentralised enforcement
+- `slash()` / `slashOverpromise()` are callable only by `IntentSettlement` — no admin grief vector; overpromise uses `slashOverpromise` so a solver who is already deregistered still gets `slashes++` and `SolverSlashed(..., 0, "overpromise")` when no stake remains to seize
+- `settle()` uses per-user nonces and marks `settled[intentId]` **before** the first external call (CEI); the function is `nonReentrant` (OpenZeppelin `ReentrancyGuard`) to block reentrant double-settlement
+- Signed intent fields **`preferredSolver`** and **`topicTier`** are enforced on-chain (`address(0)` preferred solver means open auction; `topicTier` requires `registry.solverTier(msg.sender) >= intent.topicTier`)
+- ERC20 paths use **`SafeERC20`** (`safeTransfer` / `safeTransferFrom`, `forceApprove` to the SwapRouter, allowance cleared to zero after the swap)
+- EIP-712 signature checks use **OpenZeppelin `ECDSA.tryRecover`** (not raw `ecrecover`): rejects **malleable** signatures (EIP-2 `s` range, `v` ∈ {27,28}) and does not treat a failed recovery as a match when `expected` is `address(0)`
+- **`slashForOverpromise(bid, bidSig)`** — no third argument. Slashing compares the bid’s `outputAmount` to **`settlementActualOutput[intentId]`** written at successful settlement, so callers cannot inject a fake “actual output”
+- **`deregister()`** returns stake with **`call{value:}`** (not `transfer`) so smart-wallet solvers are not bricked
+- If a slash leaves stake below the tier minimum, the registry **auto-deregisters** and **`call`s the residual stake** back to the solver (avoids locked ETH)
+- **`SolverRegistry`** is deployed as `new SolverRegistry(predictedSettlement, treasury)` — each **`SLASH_AMOUNT`** increments **`slashProceedsBalance`**; **`sweepSlashedFunds()`** ( **`treasury` only** ) sends that balance to **`treasury`**
+- **`settle()`** requires **`bid.deadline <= intent.deadline`** and **`inputToken` / `outputToken` ≠ `address(0)`** (v1 is ERC20-only; use WETH for ETH — see `IntentTypes`)
 - Run full Slither audit before mainnet deployment

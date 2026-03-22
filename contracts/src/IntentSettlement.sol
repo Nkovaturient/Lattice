@@ -1,33 +1,24 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.34;
 
 import "./IntentTypes.sol";
 import "./SolverRegistry.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 // Minimal interface — only what we call on the SwapRouter
 interface ISwapRouter {
     struct ExactInputParams {
-        bytes   path;
+        bytes path;
         address recipient;
         uint256 deadline;
         uint256 amountIn;
         uint256 amountOutMinimum;
     }
-    function exactInput(ExactInputParams calldata params)
-        external payable returns (uint256 amountOut);
-}
 
-
-interface IQuoterV2 {
-    function quoteExactInput(bytes memory path, uint256 amountIn)
-        external returns (uint256 amountOut, uint160[] memory, uint32[] memory, uint256[] memory);
-}
-
-interface IERC20 {
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
+    function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
 }
 
 // Track 4.1 — Intent settlement contract.
@@ -35,9 +26,10 @@ interface IERC20 {
 // encoded route, checks output >= minOutputAmount, pays the solver fee,
 // and protects against replay via per-user nonces.
 
-contract IntentSettlement {
+contract IntentSettlement is ReentrancyGuard {
     using IntentTypes for IntentTypes.Intent;
     using IntentTypes for IntentTypes.Bid;
+    using SafeERC20 for IERC20;
 
     // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -46,12 +38,12 @@ contract IntentSettlement {
 
     // Protocol fee: solver earns SOLVER_FEE_BPS basis points of output surplus
     // Surplus = actualOutput - minOutputAmount
-    uint256 public constant SOLVER_FEE_BPS  = 500;    // 5% of surplus
+    uint256 public constant SOLVER_FEE_BPS = 500; // 5% of surplus
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
-    // Uniswap v3 SwapRouter + QuoterV2 (same address Arbitrum mainnet + Sepolia)
+    // Uniswap v3 SwapRouter (same address Arbitrum mainnet + Sepolia)
     address public constant SWAP_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
-    address public constant QUOTER_V2   = 0x61fFE014bA17989E743c5F6cB21bF9697530B21e;
+    address public constant QUOTER_V2 = 0x61fFE014bA17989E743c5F6cB21bF9697530B21e;
 
     // ── State ─────────────────────────────────────────────────────────────────
 
@@ -59,6 +51,9 @@ contract IntentSettlement {
 
     // Replay protection: intentId → settled
     mapping(bytes32 => bool) public settled;
+
+    /// @dev Actual output token amount from the swap, recorded for on-chain overpromise checks.
+    mapping(bytes32 => uint256) public settlementActualOutput;
 
     // ── Events ────────────────────────────────────────────────────────────────
 
@@ -79,160 +74,155 @@ contract IntentSettlement {
         registry = SolverRegistry(_registry);
 
         // Compute EIP-712 domain separator — mirrors domain.js DOMAIN
-        DOMAIN_SEPARATOR = keccak256(abi.encode(
-            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-            keccak256("IntentDeFi"),
-            keccak256("1"),
-            block.chainid,
-            address(this)
-        ));
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("IntentDeFi"),
+                keccak256("1"),
+                block.chainid,
+                address(this)
+            )
+        );
     }
 
     // ── Settlement ────────────────────────────────────────────────────────────
 
     /**
      * Settle an intent with a winning solver bid.
-     * Called by the winning solver after the off-chain auction resolves.
-     *
-     * Steps:
-     *   1. Replay check — intentId not already settled
-     *   2. Deadline check — intent not expired
-     *   3. Solver check   — solver is registered and staked
-     *   4. Verify user's EIP-712 intent signature
-     *   5. Verify solver's EIP-712 bid signature
-     *   6. Verify bid is for this intent + bid not expired
-     *   7. Pull inputToken from user → this contract
-     *   8. Execute Uniswap v3 swap via encodedRoute
-     *   9. Check actualOutput >= minOutputAmount
-     *  10. Pay recipient actualOutput - solverFee
-     *  11. Pay solver solverFee
-     *  12. Increment user nonce, mark intent settled
+     * CEI: replay + nonce effects occur before any external call; recorded output
+     * and fill accounting occur before paying recipient/solver (nonReentrant on whole flow).
      */
     function settle(
         IntentTypes.Intent calldata intent,
         bytes calldata intentSig,
-        IntentTypes.Bid   calldata bid,
+        IntentTypes.Bid calldata bid,
         bytes calldata bidSig
-    ) external {
-
-        // ── 1. Replay protection ──────────────────────────────────────────────
+    ) external nonReentrant {
         bytes32 intentId = _domainHash(intent.hashIntent());
         require(!settled[intentId], "Intent already settled");
 
-        // ── 2. Deadline ───────────────────────────────────────────────────────
         require(block.timestamp <= intent.deadline, "Intent expired");
-        require(block.timestamp <= bid.deadline,    "Bid expired");
+        require(block.timestamp <= bid.deadline, "Bid expired");
+        require(bid.deadline <= intent.deadline, "Bid extends past intent");
 
-        // ── 3. Solver registry ────────────────────────────────────────────────
+        require(intent.inputToken != address(0) && intent.outputToken != address(0), "ERC20 only");
+
         require(registry.isActiveAndStaked(msg.sender), "Solver not registered");
 
-        // ── 4. Verify intent signature (user) ────────────────────────────────
-        require(
-            _verifySignature(intentId, intentSig, intent.user),
-            "Invalid intent signature"
-        );
+        require(_verifySignature(intentId, intentSig, intent.user), "Invalid intent signature");
 
-        // Nonce check — prevents replaying an old signed intent
-        require(
-            registry.nonces(intent.user) == intent.nonce,
-            "Nonce mismatch"
-        );
+        require(registry.nonces(intent.user) == intent.nonce, "Nonce mismatch");
 
-        // ── 5. Verify bid signature (solver) ─────────────────────────────────
         bytes32 bidHash = _domainHash(bid.hashBid());
-        require(
-            _verifySignature(bidHash, bidSig, msg.sender),
-            "Invalid bid signature"
-        );
+        require(_verifySignature(bidHash, bidSig, msg.sender), "Invalid bid signature");
 
-        // ── 6. Bid integrity checks ───────────────────────────────────────────
-        require(bid.intentId == intentId,                 "Bid intentId mismatch");
-        require(bid.solver   == msg.sender,               "Bid solver mismatch");
+        require(bid.intentId == intentId, "Bid intentId mismatch");
+        require(bid.solver == msg.sender, "Bid solver mismatch");
         require(bid.outputAmount >= intent.minOutputAmount, "Bid below floor");
 
-        // ── 7. Pull input tokens from user ────────────────────────────────────
-        IERC20(intent.inputToken).transferFrom(
-            intent.user, address(this), intent.inputAmount
+        // Signed intent fields: enforce preferred solver and topic tier
+        require(
+            intent.preferredSolver == address(0) || intent.preferredSolver == msg.sender,
+            "Not preferred solver"
         );
-        IERC20(intent.inputToken).approve(SWAP_ROUTER, intent.inputAmount);
+        require(registry.solverTier(msg.sender) >= intent.topicTier, "Tier mismatch");
 
-        // ── 8. Execute swap via Uniswap v3 ───────────────────────────────────
+        // Effects before any external call (CEI) — blocks reentrant double-settlement
+        settled[intentId] = true;
+        registry.incrementNonce(intent.user);
+
+        IERC20 input = IERC20(intent.inputToken);
+        input.safeTransferFrom(intent.user, address(this), intent.inputAmount);
+        input.forceApprove(SWAP_ROUTER, intent.inputAmount);
+
         uint256 actualOutput = ISwapRouter(SWAP_ROUTER).exactInput(
             ISwapRouter.ExactInputParams({
-                path:             bid.route,
-                recipient:        address(this),   // receive here, pay out below
-                deadline:         bid.deadline,
-                amountIn:         intent.inputAmount,
-                amountOutMinimum: intent.minOutputAmount  // hard floor
+                path: bid.route,
+                recipient: address(this),
+                deadline: bid.deadline,
+                amountIn: intent.inputAmount,
+                amountOutMinimum: intent.minOutputAmount
             })
         );
 
-        // ── 9. Output floor ───────────────────────────────────────────────────
         require(actualOutput >= intent.minOutputAmount, "Output below minimum");
 
-        // ── 10+11. Pay recipient + solver ────────────────────────────────────
-        uint256 surplus   = actualOutput - intent.minOutputAmount;
-        uint256 solverFee = (surplus * SOLVER_FEE_BPS) / BPS_DENOMINATOR;
-        uint256 userGets  = actualOutput - solverFee;
+        (uint256 userGets, uint256 solverFee) = _feeSplit(actualOutput, intent.minOutputAmount);
 
-        IERC20(intent.outputToken).transfer(intent.recipient, userGets);
-        IERC20(intent.outputToken).transfer(msg.sender,       solverFee);
+        // Record before outbound transfers (CEI) — binds slashForOverpromise to on-chain truth
+        settlementActualOutput[intentId] = actualOutput;
+        registry.recordFill(msg.sender);
 
-        // ── 12. State updates ─────────────────────────────────────────────────
-        settled[intentId] = true;
-        registry.incrementNonce(intent.user);
-        registry.recordFill(msg.sender);  // Track 5.2: fill history for tier progression
-
-        emit IntentSettled(
+        _payOutputsAndCleanup(
+            IERC20(intent.outputToken),
+            intent.recipient,
+            intent.inputToken,
+            userGets,
+            solverFee,
             intentId,
             intent.user,
-            msg.sender,
             intent.inputAmount,
-            actualOutput,
-            solverFee
+            actualOutput
         );
     }
 
     // ── Slash helpers ─────────────────────────────────────────────────────────
 
     /**
-     * Slash a solver who submitted a bid with outputAmount > actual swap output.
-     * Callable by anyone with proof (the original bid struct + sig).
-     * Proof: re-simulate the same route and show it yields < bid.outputAmount.
+     * Slash a solver who bid outputAmount above what settlement produced.
+     * Uses the output amount recorded at settlement time — callers cannot inject a fake actualOutput.
+     * Uses `slashOverpromise` so deregistered solvers (e.g. after an earlier auto-slash) still get
+     * `slashes` / events when no stake remains to take.
      */
-    function slashForOverpromise(
-        IntentTypes.Bid calldata bid,
-        bytes calldata bidSig,
-        uint256 actualOutput
-    ) external {
+    function slashForOverpromise(IntentTypes.Bid calldata bid, bytes calldata bidSig) external {
         bytes32 bidHash = _domainHash(bid.hashBid());
-        require(
-            _verifySignature(bidHash, bidSig, bid.solver),
-            "Invalid bid signature"
-        );
-        require(actualOutput < bid.outputAmount, "No overpromise to slash");
+        require(_verifySignature(bidHash, bidSig, bid.solver), "Invalid bid signature");
 
-        registry.slash(bid.solver, "overpromise");
+        bytes32 intentId = bid.intentId;
+        require(settled[intentId], "Intent not settled");
+        uint256 recorded = settlementActualOutput[intentId];
+        require(recorded < bid.outputAmount, "No overpromise to slash");
+
+        registry.slashOverpromise(bid.solver);
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
+
+    function _feeSplit(uint256 actualOutput, uint256 minOutputAmount)
+        private
+        pure
+        returns (uint256 userGets, uint256 solverFee)
+    {
+        uint256 surplus = actualOutput - minOutputAmount;
+        solverFee = (surplus * SOLVER_FEE_BPS) / BPS_DENOMINATOR;
+        userGets = actualOutput - solverFee;
+    }
+
+    function _payOutputsAndCleanup(
+        IERC20 outputToken,
+        address recipient,
+        address inputToken,
+        uint256 userGets,
+        uint256 solverFee,
+        bytes32 intentId,
+        address user,
+        uint256 inputAmount,
+        uint256 actualOutput
+    ) private {
+        outputToken.safeTransfer(recipient, userGets);
+        outputToken.safeTransfer(msg.sender, solverFee);
+        IERC20(inputToken).forceApprove(SWAP_ROUTER, 0);
+        emit IntentSettled(intentId, user, msg.sender, inputAmount, actualOutput, solverFee);
+    }
 
     function _domainHash(bytes32 structHash) internal view returns (bytes32) {
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
     }
 
-    function _verifySignature(
-        bytes32 hash,
-        bytes calldata sig,
-        address expected
-    ) internal pure returns (bool) {
-        require(sig.length == 65, "Invalid sig length");
-        bytes32 r; bytes32 s; uint8 v;
-        assembly {
-            r := calldataload(sig.offset)
-            s := calldataload(add(sig.offset, 32))
-            v := byte(0, calldataload(add(sig.offset, 64)))
-        }
-        return ecrecover(hash, v, r, s) == expected;
+    /// @dev Uses OZ ECDSA: rejects EIP-2 malleable signatures (high `s`, invalid `v`) and never treats
+    ///      `ecrecover` failure as matching `expected` (including `expected == address(0)`).
+    function _verifySignature(bytes32 hash, bytes calldata sig, address expected) internal pure returns (bool) {
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(hash, bytes(sig));
+        return err == ECDSA.RecoverError.NoError && recovered == expected;
     }
 }
