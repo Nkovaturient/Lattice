@@ -2,6 +2,10 @@
 
 **Private solver mesh. Intents settled before the chain sees them.**
 
+<div align="center">
+<img src="https://github.com/user-attachments/assets/2553ca98-6769-406f-af53-49162d9b99d2" height="500" />
+</div>
+
 Lattice is an intent-based DeFi coordination layer built on js-libp2p. Users sign what they want. Solvers compete privately to fill it. The best solution lands on-chain. No mempool exposure. No MEV leak. No trusted relayer.
 
 > It earns the name on three levels — gossip (GossipSub is the propagation engine), lattice as in ultra-fine mesh fabric (the solver subnet topology), and the connotation of something fast and nearly invisible. That last part is exactly what good infrastructure feels like.
