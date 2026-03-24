@@ -1,14 +1,14 @@
 // Track 1.1 + 3.1 — Solver node bootstrap with RFQ handler injection
 import { createLibp2p } from 'libp2p'
 import { webSockets } from '@libp2p/websockets'
-// import { all } from '@libp2p/websockets'
 import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
-import { gossipsub } from '@chainsafe/libp2p-gossipsub'
+import { gossipsub } from '@libp2p/gossipsub'
 import { identify } from '@libp2p/identify'
+import { ping } from '@libp2p/ping'
 import { kadDHT } from '@libp2p/kad-dht'
-import { bootstrap } from '@libp2p/bootstrap'
-import { GOSSIP_CONFIG } from '../libp2p/gossip-config.js'
+import {bootstrap} from '@libp2p/bootstrap'
+import { GOSSIP_CONFIG } from '../libp2p/gossipsub-config.js'
 import { attachIntentValidators } from '../libp2p/validators.js'
 import { SolverRegistryCache } from '../libp2p/registry-cache.js'
 import { TOPICS } from '../libp2p/topics.js'
@@ -45,11 +45,12 @@ export async function createSolverNode(config) {
     addresses: {
       listen: [`/ip4/0.0.0.0/tcp/${config.port ?? 9000}/ws`],
     },
-    transports: [webSockets({ filter: all })],
+    transports: [webSockets()],
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
     services: {
       identify: identify(),
+      ping:     ping(),
       pubsub:   gossipsub(GOSSIP_CONFIG),
       dht:      kadDHT({ clientMode: false }),
     },
@@ -59,8 +60,10 @@ export async function createSolverNode(config) {
       autoDialConcurrency: 4,
     },
     peerDiscovery: [
-      bootstrap({ list: config.bootstrapList ?? [] }),
-    ],
+      ...(config.bootstrapList?.length
+        ? [bootstrap({ list: config.bootstrapList })]
+        : []),
+    ]
   })
 
   await node.start()

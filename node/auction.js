@@ -4,9 +4,9 @@
 // and emits it for settlement submission (solver submits the tx — Track 4.1).
 import { decodeIntent } from '../sdk/intent-codec.js'
 import { verifyBid } from '../sdk/bid-builder.js'
-import { requestBid } from '../p2p/rfq-protocol.js'
-import { TOPICS } from '../p2p/topics.js'
-import { PROTOCOL } from '../../config/protocol.js'
+import { requestBid } from '../libp2p/rfq-protocol.js'
+import { TOPICS } from '../libp2p/topics.js'
+import { PROTOCOL } from '../config/protocol.js'
 
 // ── Auction coordinator ───────────────────────────────────────────────────────
 

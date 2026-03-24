@@ -1,7 +1,6 @@
 // Track 1.2 — Bootstrap / rendezvous node
 import { createLibp2p } from 'libp2p'
 import { webSockets } from '@libp2p/websockets'
-import { all } from '@libp2p/websockets/filters'
 import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { identify } from '@libp2p/identify'
@@ -10,7 +9,7 @@ import { kadDHT } from '@libp2p/kad-dht'
 export async function createBootstrapNode(port = 9100) {
   const node = await createLibp2p({
     addresses: { listen: [`/ip4/0.0.0.0/tcp/${port}/ws`] },
-    transports: [webSockets({ filter: all })],
+    transports: [webSockets()],
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
     services: {

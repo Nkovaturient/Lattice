@@ -5,7 +5,7 @@ export const GOSSIP_CONFIG = {
   emitSelf:            false,  // never process own published intents
   gossipIncoming:      true,   // relay gossip to mesh peers
   fallbackToFloodsub:  false,  // pure gossipsub — no flood fallback
-  floodPublish:        false,  // use mesh, not flood, on publish
+  floodPublish:        false, // mesh + fanout only (see libp2p/topics.js — intents/v1/evm/1/public)
 
   // Mesh degree — lower than default (6) for small trusted solver subnet
   D:      4,  // target mesh peers

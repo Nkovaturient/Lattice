@@ -1,6 +1,4 @@
-// Track 2.3 / 5.2 — GossipSub topic validators + propagation jitter
-// Jitter added to forwarding defeats timing-based origin fingerprinting.
-import { TopicValidatorResult } from '@libp2p/interface'
+import { TopicValidatorResult } from '@libp2p/gossipsub'
 import { ethers } from 'ethers'
 import { TOPICS } from './topics.js'
 import { DOMAIN, INTENT_TYPE } from '../sdk/domain.js'

@@ -1,15 +1,10 @@
-#!/usr/bin/env node
 // scripts/run-solver.js — Real solver node on Arbitrum Sepolia
-// Usage:
-//   PRIVATE_KEY=0x... ARB_SEPOLIA_RPC=https://... \
-//   SETTLEMENT_CONTRACT_ADDRESS=0x... REGISTRY_CONTRACT_ADDRESS=0x... \
-//   node scripts/run-solver.js
-
-import { ethers } from 'ethers'
-import { createSolverNode } from '../src/node/solver.js'
-import { createComputeEngine, PoolStateCache, UNISWAP_V3 } from '../src/node/compute-engine.js'
-import { attachAuctionCoordinator } from '../src/node/auction.js'
-import { initCodec } from '../src/sdk/intent-codec.js'
+import 'dotenv/config'
+import { ethers, Network } from 'ethers'
+import { createSolverNode } from '../node/solver.js'
+import { createComputeEngine, PoolStateCache } from '../node/compute-engine.js'
+import { attachAuctionCoordinator } from '../node/auction.js'
+import { initCodec } from '../sdk/intent-codec.js'
 
 // ── Env ───────────────────────────────────────────────────────────────────────
 const {
@@ -19,7 +14,7 @@ const {
   REGISTRY_CONTRACT_ADDRESS,
   BOOTSTRAP_PEERS,         // comma-separated multiaddrs of bootstrap nodes
   SOLVER_PORT = '9000',
-  SOLVER_TIER = '1',
+  SOLVER_TIER = '0',
 } = process.env
 
 if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC) {
@@ -38,19 +33,21 @@ const REGISTRY_ABI = [
   'event SolverDeregistered(address indexed solver)',
 ]
 
-// ── Well-known Arbitrum Sepolia Uniswap v3 pools to watch ────────────────────
-// These are the pools whose state gets cached on every block
+// ── Arbitrum Sepolia Uniswap v3 pools (factory 0x248AB79…0188e) ─────────────
+// Resolved via getPool — not Arbitrum One mainnet pool addresses.
 const WATCHED_POOLS_ARB_SEPOLIA = [
-  // USDC/WETH 0.3%  — most liquid general-purpose pool
-  '0x6337CAef1BB4B8E93C65aCD7f4BEB9E52a908A30',
-  // WETH/USDT 0.3%
-  '0x641C00A822e8b671738d32a431a4Fb6074E5c79d',
+  '0x66EEAB70aC52459Dd74C6AD50D578Ef76a441bbf', // USDC/WETH 0.3%
+  '0x6F112d524DC998381C09b4e53C7e5e2cc260f877', // USDC/WETH 0.05%
 ]
 
 async function main() {
-  const provider = new ethers.JsonRpcProvider(ARB_SEPOLIA_RPC)
-  const wallet   = new ethers.Wallet(PRIVATE_KEY, provider)
-  const network  = await provider.getNetwork()
+  const chainIdNum = Number(process.env.ARB_SEPOLIA_CHAIN_ID ?? process.env.CHAIN_ID ?? 421614)
+  const provider = new ethers.JsonRpcProvider(ARB_SEPOLIA_RPC, Network.from(chainIdNum), {
+    staticNetwork:   true,
+    pollingInterval: 12_000,
+  })
+  const wallet  = new ethers.Wallet(PRIVATE_KEY, provider)
+  const network = await provider.getNetwork()
 
   console.log(`[solver] chain: ${network.name} (${network.chainId})`)
   console.log(`[solver] address: ${wallet.address}`)
@@ -74,10 +71,13 @@ async function main() {
   // ── Compute engine — real Uniswap v3 pathfinding ──────────────────────────
   const computeSolution = createComputeEngine(wallet, poolCache)
 
-  // ── Bootstrap peers ───────────────────────────────────────────────────────
+  // ── Bootstrap peers (optional — omit to run standalone / local testing)
   const bootstrapList = BOOTSTRAP_PEERS
-    ? BOOTSTRAP_PEERS.split(',').map(s => s.trim())
+    ? BOOTSTRAP_PEERS.split(',').map(s => s.trim()).filter(Boolean)
     : []
+  if (bootstrapList.length === 0) {
+    console.warn('[solver] BOOTSTRAP_PEERS not set — no automatic peer discovery')
+  }
 
   // ── Start libp2p solver node ──────────────────────────────────────────────
   const node = await createSolverNode({

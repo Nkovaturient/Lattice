@@ -6,7 +6,7 @@
 // Injected into solver.js as config.computeSolution — keeps DEX logic
 // separate from p2p transport logic.
 import { ethers } from 'ethers'
-import { encodeSingleHop, encodeTwoHop, selectFeeTier, FEE_TIERS } from '../sdk/route-encoder.js'
+import { encodeSingleHop, encodeTwoHop, selectFeeTier, FEE_TIERS } from '../node/route-encoder.js'
 import { buildBid } from '../sdk/bid-builder.js'
 
 // ── Uniswap v3 ABIs (minimal — only what we read) ────────────────────────────
@@ -23,10 +23,39 @@ const FACTORY_ABI = [
   'function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)',
 ]
 
-// Mainnet addresses
+// Canonical Multicall3 — same address on Ethereum L1s/L2s including Arbitrum Sepolia
+const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11'
+const MULTICALL3_ABI = [
+  'function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[])',
+]
+
+const poolIface = new ethers.Interface(POOL_ABI)
+
+// Default — Ethereum mainnet (legacy export for callers that assume mainnet)
 export const UNISWAP_V3 = {
   FACTORY: '0x1F98431c8aD98523631AE4a59f267346ea31F984',
   WETH:    '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+}
+
+// Per @uniswap/sdk-core CHAIN_TO_ADDRESSES_MAP (+ canonical wrapped native)
+export function uniswapV3ForChain(chainId) {
+  const id = Number(chainId)
+  if (id === 1) {
+    return { FACTORY: UNISWAP_V3.FACTORY, WETH: UNISWAP_V3.WETH }
+  }
+  if (id === 42161) {
+    return {
+      FACTORY: '0x1F98431c8aD98523631AE4a59f267346ea31F984',
+      WETH:    '0x82aF49447D8a07e3bd95BD0d56f35241523FbAb1',
+    }
+  }
+  if (id === 421614) {
+    return {
+      FACTORY: '0x248AB79Bbb9bC29bB72f7Cd42F17e054Fc40188e',
+      WETH:    '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73',
+    }
+  }
+  return null
 }
 
 // ── Pool state cache ──────────────────────────────────────────────────────────
@@ -37,15 +66,27 @@ export const UNISWAP_V3 = {
  *
  * Cache entry: { sqrtPriceX96, liquidity, tick, token0, token1, fee, cachedAt }
  */
+const MIN_REFRESH_INTERVAL_MS = 4_000
+const BLOCK_DEBOUNCE_MS = 600
+
 export class PoolStateCache {
-  #cache    = new Map()   // poolAddress → state
-  #provider = null
-  #factory  = null
-  #watcher  = null
+  #cache         = new Map()   // poolAddress → state
+  #provider      = null
+  #factory       = null
+  #weth         = null
+  #blockHandler  = null
+  #debounceTimer = null
+  #refreshing    = false
+  #lastRefreshAt = 0
+  #poolsToWatch  = []
 
   constructor(provider) {
     this.#provider = provider
-    this.#factory  = new ethers.Contract(UNISWAP_V3.FACTORY, FACTORY_ABI, provider)
+  }
+
+  /** Wrapped native token for this chain (set in start). */
+  get wrappedNative() {
+    return this.#weth
   }
 
   /**
@@ -53,19 +94,39 @@ export class PoolStateCache {
    * Call once at solver startup — runs for the lifetime of the node.
    */
   async start(poolsToWatch) {
-    // Initial warm-up — fetch all watched pools before first auction
-    await this._refreshAll(poolsToWatch)
-    console.log(`[cache] warmed ${poolsToWatch.length} pools`)
+    const { chainId } = await this.#provider.getNetwork()
+    const u = uniswapV3ForChain(chainId)
+    if (!u) {
+      console.warn(`[cache] chain ${chainId} — no Uniswap v3 mapping; pool cache inactive`)
+      return
+    }
+    this.#factory = new ethers.Contract(u.FACTORY, FACTORY_ABI, this.#provider)
+    this.#weth    = u.WETH
 
-    // Refresh on every new block
-    this.#watcher = this.#provider.on('block', async (blockNum) => {
-      await this._refreshAll(poolsToWatch)
-        .catch(e => console.warn(`[cache] refresh failed at block ${blockNum}:`, e.message))
-    })
+    this.#poolsToWatch = poolsToWatch
+    await this._runRefreshSafe('warmup')
+    const ok = poolsToWatch.filter(a => this.get(a)).length
+    console.log(`[cache] warmed ${ok}/${poolsToWatch.length} pools (chain ${chainId})`)
+
+    this.#blockHandler = () => {
+      if (this.#debounceTimer != null) clearTimeout(this.#debounceTimer)
+      this.#debounceTimer = setTimeout(() => {
+        this.#debounceTimer = null
+        this._runRefreshSafe('block').catch(() => {})
+      }, BLOCK_DEBOUNCE_MS)
+    }
+    await this.#provider.on('block', this.#blockHandler)
   }
 
   stop() {
-    if (this.#watcher) this.#provider.off('block', this.#watcher)
+    if (this.#debounceTimer != null) {
+      clearTimeout(this.#debounceTimer)
+      this.#debounceTimer = null
+    }
+    if (this.#blockHandler) {
+      this.#provider.off('block', this.#blockHandler)
+      this.#blockHandler = null
+    }
   }
 
   /**
@@ -80,39 +141,111 @@ export class PoolStateCache {
    * Result is NOT cached — factory calls are used at startup only.
    */
   async resolvePool(tokenA, tokenB, fee) {
+    if (this.#factory == null) return null
     const addr = await this.#factory.getPool(tokenA, tokenB, fee)
     if (addr === ethers.ZeroAddress) return null
     return addr.toLowerCase()
   }
 
-  async _refreshAll(pools) {
-    await Promise.allSettled(
-      pools.map(addr => this._refreshOne(addr))
-    )
+  async _runRefreshSafe(reason) {
+    const now = Date.now()
+    if (this.#refreshing) return
+    if (reason !== 'warmup' && now - this.#lastRefreshAt < MIN_REFRESH_INTERVAL_MS) return
+    this.#refreshing = true
+    try {
+      await this._refreshAllBatched(this.#poolsToWatch)
+    } catch (e) {
+      const msg = e?.shortMessage ?? e?.message ?? String(e)
+      if (String(msg).includes('429') || String(msg).includes('Too Many')) {
+        console.warn(`[cache] RPC rate-limited (${reason}) — keeping last good snapshot`)
+      } else {
+        console.warn(`[cache] refresh failed (${reason}):`, msg)
+      }
+      await this._refreshAllSequentialQuiet(this.#poolsToWatch)
+    } finally {
+      this.#lastRefreshAt = Date.now()
+      this.#refreshing = false
+    }
   }
 
-  async _refreshOne(poolAddress) {
-    try {
-      const pool     = new ethers.Contract(poolAddress, POOL_ABI, this.#provider)
-      const [slot0, liquidity, token0, token1, fee] = await Promise.all([
-        pool.slot0(),
-        pool.liquidity(),
-        pool.token0(),
-        pool.token1(),
-        pool.fee(),
-      ])
+  /** One JSON-RPC via Multicall3 — avoids N×5 concurrent eth_calls per block. */
+  async _refreshAllBatched(pools) {
+    if (pools.length === 0) return
+    const mc = new ethers.Contract(MULTICALL3, MULTICALL3_ABI, this.#provider)
+    const calls = []
+    const order = []
+    for (const raw of pools) {
+      const checksummed = ethers.getAddress(String(raw).trim())
+      order.push(checksummed)
+      for (const fn of ['slot0', 'liquidity', 'token0', 'token1', 'fee']) {
+        calls.push({
+          target:       checksummed,
+          allowFailure: true,
+          callData:     poolIface.encodeFunctionData(fn, []),
+        })
+      }
+    }
+    const results = await mc.aggregate3.staticCall(calls)
+    for (let i = 0; i < order.length; i++) {
+      const base = i * 5
+      const r0 = results[base]
+      const r1 = results[base + 1]
+      const r2 = results[base + 2]
+      const r3 = results[base + 3]
+      const r4 = results[base + 4]
+      const addrLc = order[i].toLowerCase()
+      try {
+        if (!r0?.success || !r1?.success || !r2?.success || !r3?.success || !r4?.success) continue
+        const slot0     = poolIface.decodeFunctionResult('slot0', r0.returnData)
+        const liquidity = poolIface.decodeFunctionResult('liquidity', r1.returnData)[0]
+        const token0    = poolIface.decodeFunctionResult('token0', r2.returnData)[0]
+        const token1    = poolIface.decodeFunctionResult('token1', r3.returnData)[0]
+        const fee       = poolIface.decodeFunctionResult('fee', r4.returnData)[0]
 
-      this.#cache.set(poolAddress.toLowerCase(), {
+        this.#cache.set(addrLc, {
+          sqrtPriceX96: slot0.sqrtPriceX96,
+          tick:         slot0.tick,
+          liquidity,
+          token0:       token0.toLowerCase(),
+          token1:       token1.toLowerCase(),
+          fee:          Number(fee),
+          cachedAt:     Date.now(),
+        })
+      } catch {
+        // ignore single-pool decode failures
+      }
+    }
+  }
+
+  /** Fallback: one RPC at a time (quiet logs) when multicall fails. */
+  async _refreshAllSequentialQuiet(pools) {
+    for (const addr of pools) {
+      await this._refreshOneSequential(addr)
+      await new Promise(r => setTimeout(r, 75))
+    }
+  }
+
+  async _refreshOneSequential(poolAddress) {
+    try {
+      const checksummed = ethers.getAddress(String(poolAddress).trim())
+      const pool        = new ethers.Contract(checksummed, POOL_ABI, this.#provider)
+      const slot0     = await pool.slot0()
+      const liquidity = await pool.liquidity()
+      const token0    = await pool.token0()
+      const token1    = await pool.token1()
+      const fee       = await pool.fee()
+
+      this.#cache.set(checksummed.toLowerCase(), {
         sqrtPriceX96: slot0.sqrtPriceX96,
         tick:         slot0.tick,
-        liquidity:    liquidity,
+        liquidity,
         token0:       token0.toLowerCase(),
         token1:       token1.toLowerCase(),
         fee:          Number(fee),
         cachedAt:     Date.now(),
       })
-    } catch (e) {
-      console.warn(`[cache] failed to refresh pool ${poolAddress.slice(0, 10)}:`, e.message)
+    } catch {
+      // keep previous cache entry
     }
   }
 }
@@ -172,6 +305,12 @@ export function estimateOutput(poolState, tokenIn, amountIn) {
  */
 export function createComputeEngine(solverSigner, poolCache) {
   return async function computeSolution(intent) {
+    const weth = poolCache.wrappedNative
+    if (weth == null) {
+      console.warn('[compute] pool cache has no chain config — cannot quote')
+      return null
+    }
+
     const {
       inputToken, outputToken,
       inputAmount, minOutputAmount,
@@ -179,6 +318,7 @@ export function createComputeEngine(solverSigner, poolCache) {
 
     const amountIn  = BigInt(inputAmount)
     const minOut    = BigInt(minOutputAmount)
+    const wethLc    = weth.toLowerCase()
 
     // ── 1. Single-hop: try each fee tier, keep best ────────────────────────
     let bestOutput = 0n
@@ -201,25 +341,25 @@ export function createComputeEngine(solverSigner, poolCache) {
     }
 
     // ── 2. Two-hop via WETH if no direct pool or below floor ───────────────
-    if (bestOutput < minOut && inputToken.toLowerCase() !== UNISWAP_V3.WETH.toLowerCase()
-                            && outputToken.toLowerCase() !== UNISWAP_V3.WETH.toLowerCase()) {
-      const fee01 = selectFeeTier(inputToken, UNISWAP_V3.WETH)
-      const fee12 = selectFeeTier(UNISWAP_V3.WETH, outputToken)
+    if (bestOutput < minOut && inputToken.toLowerCase() !== wethLc
+                            && outputToken.toLowerCase() !== wethLc) {
+      const fee01 = selectFeeTier(inputToken, weth)
+      const fee12 = selectFeeTier(weth, outputToken)
 
-      const pool01Addr = await poolCache.resolvePool(inputToken, UNISWAP_V3.WETH, fee01)
-      const pool12Addr = await poolCache.resolvePool(UNISWAP_V3.WETH, outputToken, fee12)
+      const pool01Addr = await poolCache.resolvePool(inputToken, weth, fee01)
+      const pool12Addr = await poolCache.resolvePool(weth, outputToken, fee12)
 
       if (pool01Addr && pool12Addr) {
         const state01 = poolCache.get(pool01Addr)
         const state12 = poolCache.get(pool12Addr)
 
         if (state01 && state12) {
-          const midAmount  = estimateOutput(state01, inputToken,        amountIn)
-          const finalAmount = estimateOutput(state12, UNISWAP_V3.WETH, midAmount)
+          const midAmount   = estimateOutput(state01, inputToken, amountIn)
+          const finalAmount = estimateOutput(state12, weth, midAmount)
 
           if (finalAmount > bestOutput) {
             bestOutput = finalAmount
-            bestRoute  = encodeTwoHop(inputToken, fee01, UNISWAP_V3.WETH, fee12, outputToken)
+            bestRoute  = encodeTwoHop(inputToken, fee01, weth, fee12, outputToken)
           }
         }
       }

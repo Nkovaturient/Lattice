@@ -197,6 +197,24 @@ forge script script/Deploy.s.sol \
   --verify \
   --etherscan-api-key $ARBISCAN_API_KEY
 
+# Verified Solver Registry contract
+forge verify-contract 0x57B68C7595B8de5376D7B3c6CDAFCc415cB597d4 \
+  src/SolverRegistry.sol:SolverRegistry \
+  --chain arbitrum-sepolia \
+  --etherscan-api-key $ARBISCAN_API_KEY \
+  --constructor-args $(cast abi-encode "constructor(address,address)" \
+    0x438B7889a1428F63f6450D3c1C2BAb39f80EDAca \
+    0x1Bf95a7322D3B207A5a6f1beed9dD2C8145558fC)
+
+# Verified Intent Settlement contract
+
+forge verify-contract 0x438B7889a1428F63f6450D3c1C2BAb39f80EDAca \
+  src/IntentSettlement.sol:IntentSettlement \
+  --chain arbitrum-sepolia \
+  --etherscan-api-key $ARBISCAN_API_KEY \
+  --constructor-args $(cast abi-encode "constructor(address)" \
+    0x57B68C7595B8de5376D7B3c6CDAFCc415cB597d4)
+
 # Copy printed addresses into .env:
 # SETTLEMENT_CONTRACT_ADDRESS=0x...
 # REGISTRY_CONTRACT_ADDRESS=0x...
@@ -210,7 +228,7 @@ SOLVER_KEY=$PRIVATE_KEY \
 USER_KEY=$USER_PRIVATE_KEY \
 SETTLEMENT_CONTRACT_ADDRESS=$SETTLEMENT_CONTRACT_ADDRESS \
 REGISTRY_CONTRACT_ADDRESS=$REGISTRY_CONTRACT_ADDRESS \
-node test/integration/e2e-sepolia.test.mjs
+node test/unit/e2e-sepolia.test.mjs
 ```
 
 ---
@@ -248,7 +266,7 @@ forge script script/Deploy.s.sol \
 
 | Network | SolverRegistry | IntentSettlement |
 |---|---|---|
-| Arbitrum Sepolia | `0x...` | `0x...` |
+| Arbitrum Sepolia | [Deployed contract](https://sepolia.arbiscan.io/address/0x57b68c7595b8de5376d7b3c6cdafcc415cb597d4) | [IS Deployed contract](https://sepolia.arbiscan.io/address/0x438b7889a1428f63f6450d3c1c2bab39f80edaca) |
 | Arbitrum Mainnet | `0x...` | `0x...` |
 
 ---
