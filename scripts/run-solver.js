@@ -5,6 +5,7 @@ import { createSolverNode } from '../node/solver.js'
 import { createComputeEngine, PoolStateCache } from '../node/compute-engine.js'
 import { attachAuctionCoordinator } from '../node/auction.js'
 import { initCodec } from '../sdk/intent-codec.js'
+import { SolverRegistryABI } from '../ABI/SolverRegistryABI.js'
 
 // ── Env ───────────────────────────────────────────────────────────────────────
 const {
@@ -21,17 +22,6 @@ if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC) {
   console.error('Required: PRIVATE_KEY, ARB_SEPOLIA_RPC')
   process.exit(1)
 }
-
-// ── ABIs (minimal) ────────────────────────────────────────────────────────────
-const REGISTRY_ABI = [
-  'function isRegistered(address) view returns (bool)',
-  'function isActiveAndStaked(address) view returns (bool)',
-  'function peerIdToAddress(string) view returns (address)',
-  'function nonces(address) view returns (uint256)',
-  'event SolverRegistered(address indexed solver, string peerId)',
-  'event SolverSlashed(address indexed solver, uint256 amount, string reason)',
-  'event SolverDeregistered(address indexed solver)',
-]
 
 // ── Arbitrum Sepolia Uniswap v3 pools (factory 0x248AB79…0188e) ─────────────
 // Resolved via getPool — not Arbitrum One mainnet pool addresses.
@@ -61,7 +51,7 @@ async function main() {
 
   // ── Registry contract ─────────────────────────────────────────────────────
   const registryContract = REGISTRY_CONTRACT_ADDRESS
-    ? new ethers.Contract(REGISTRY_CONTRACT_ADDRESS, REGISTRY_ABI, provider)
+    ? new ethers.Contract(REGISTRY_CONTRACT_ADDRESS, SolverRegistryABI, provider)
     : null
 
   if (!registryContract) {

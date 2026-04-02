@@ -14,6 +14,7 @@ import { computeIntentId } from '../sdk/intent-id.js'
 import { DOMAIN, INTENT_TYPE } from '../sdk/domain.js'
 import { topicForIntent } from '../libp2p/topics.js'
 import { GOSSIP_CONFIG } from '../libp2p/gossipsub-config.js'
+import { SolverRegistryABI } from '../ABI/SolverRegistryABI.js'
 
 // ── Arb Sepolia defaults (Uniswap test tokens) ───────────────────────────────
 const DEFAULT_SWAP = {
@@ -46,9 +47,6 @@ const outputToken     = OUTPUT_TOKEN?.trim()     || DEFAULT_SWAP.OUTPUT_TOKEN
 const inputAmount     = INPUT_AMOUNT?.trim()     || DEFAULT_SWAP.INPUT_AMOUNT
 const minOutputAmount = MIN_OUTPUT?.trim()       || DEFAULT_SWAP.MIN_OUTPUT
 
-const REGISTRY_ABI = [
-  'function nonces(address) view returns (uint256)',
-]
 
 /** Subscription RPCs received — peer is in our topic view (required before mesh graft). */
 async function waitForTopicSubscribers(pubsub, topic, { timeoutMs = 30_000, intervalMs = 150 } = {}) {
@@ -107,7 +105,7 @@ async function main() {
   let nonce = 0n
   const registryAddr = REGISTRY_CONTRACT_ADDRESS?.trim()
   if (registryAddr) {
-    const registry = new ethers.Contract(registryAddr, REGISTRY_ABI, provider)
+    const registry = new ethers.Contract(registryAddr, SolverRegistryABI, provider)
     nonce = await registry.nonces(wallet.address)
   } else {
     console.warn('[user] REGISTRY_CONTRACT_ADDRESS not set — using nonce 0 (set for real settlement)')

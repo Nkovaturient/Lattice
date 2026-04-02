@@ -10,9 +10,10 @@
 // - Tier 0 (public mesh): TIER0_MIN_STAKE = 0.05 ETH, no fill history.
 // - Tier 1 (trusted topic): TIER1_MIN_STAKE = 0.5 ETH and fills >= MIN_FILLS_TIER1 (10) — cannot register tier 1 on first tx.
 //
-// Usage — register tier 0 (default):
+// Usage — registered tier 0 (default):
 //   source .env
-//   PEER_ID=12D3KooW... node scripts/register-solver.js
+//   PEER_ID=12D3KooWJdBPvDuYiCxDxwiQXKqBjmcY8YgRUazArzyJHwgjgJas node scripts/register-solver.js
+// Registered tier 0 with above peerId
 // /ip4/127.0.0.1/tcp/9000/ws/p2p/12D3KooWJdBPvDuYiCxDxwiQXKqBjmcY8YgRUazArzyJHwgjgJas
 //
 // Upgrade to tier 1 after you have >= 10 fills on-chain:
@@ -20,6 +21,7 @@
 
 import 'dotenv/config'
 import { ethers } from 'ethers'
+import { SolverRegistryABI } from '../ABI/SolverRegistryABI.js'
 
 const {
   PRIVATE_KEY,
@@ -35,24 +37,24 @@ if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC || !REGISTRY_CONTRACT_ADDRESS) {
   process.exit(1)
 }
 
-const REGISTRY_ABI = [
-  'function register(string peerId, uint8 tier) payable',
-  'function upgradeTier() payable',
-  'function isRegistered(address) view returns (bool)',
-  'function stake(address) view returns (uint256)',
-  'function solverTier(address) view returns (uint8)',
-  'function solvers(address) view returns (bool registered, uint8 tier, uint256 stake, uint256 fills, uint256 slashes, string peerId)',
-  'function MIN_STAKE() view returns (uint256)',
-  'function TIER0_MIN_STAKE() view returns (uint256)',
-  'function TIER1_MIN_STAKE() view returns (uint256)',
-  'function MIN_FILLS_TIER1() view returns (uint256)',
-  'event SolverRegistered(address indexed solver, string peerId, uint8 tier)',
-]
+// const REGISTRY_ABI = [
+//   'function register(string peerId, uint8 tier) payable',
+//   'function upgradeTier() payable',
+//   'function isRegistered(address) view returns (bool)',
+//   'function stake(address) view returns (uint256)',
+//   'function solverTier(address) view returns (uint8)',
+//   'function solvers(address) view returns (bool registered, uint8 tier, uint256 stake, uint256 fills, uint256 slashes, string peerId)',
+//   'function MIN_STAKE() view returns (uint256)',
+//   'function TIER0_MIN_STAKE() view returns (uint256)',
+//   'function TIER1_MIN_STAKE() view returns (uint256)',
+//   'function MIN_FILLS_TIER1() view returns (uint256)',
+//   'event SolverRegistered(address indexed solver, string peerId, uint8 tier)',
+// ]
 
 async function main() {
   const provider = new ethers.JsonRpcProvider(ARB_SEPOLIA_RPC)
   const wallet   = new ethers.Wallet(PRIVATE_KEY, provider)
-  const registry = new ethers.Contract(REGISTRY_CONTRACT_ADDRESS, REGISTRY_ABI, wallet)
+  const registry = new ethers.Contract(REGISTRY_CONTRACT_ADDRESS, SolverRegistryABI, wallet)
 
   if (REGISTER_ACTION === 'upgrade') {
     const s = await registry.solvers(wallet.address)

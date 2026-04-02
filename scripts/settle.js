@@ -8,6 +8,8 @@
 //   node scripts/settle.js
 
 import { ethers } from 'ethers'
+import { IntentSettlementABI } from '../ABI/IntentSettlementABI.js'
+import { MockERC20ABI } from '../ABI/MockERC20ABI.js'
 
 const {
   PRIVATE_KEY,
@@ -23,31 +25,31 @@ if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC || !SETTLEMENT_CONTRACT_ADDRESS || !INTENT_
 }
 
 // ── Settlement ABI ────────────────────────────────────────────────────────────
-const SETTLEMENT_ABI = [
-  `function settle(
-    tuple(address user, uint256 nonce, address inputToken, address outputToken,
-          uint256 inputAmount, uint256 minOutputAmount, address recipient,
-          uint64 deadline, uint8 topicTier, address preferredSolver) intent,
-    bytes intentSig,
-    tuple(bytes32 intentId, address solver, uint256 outputAmount,
-          bytes route, uint64 deadline) bid,
-    bytes bidSig
-  ) external`,
-  'function settled(bytes32) view returns (bool)',
-  'event IntentSettled(bytes32 indexed intentId, address indexed user, address indexed solver, uint256 inputAmount, uint256 outputAmount, uint256 solverFee)',
-]
+// const SETTLEMENT_ABI = [
+//   `function settle(
+//     tuple(address user, uint256 nonce, address inputToken, address outputToken,
+//           uint256 inputAmount, uint256 minOutputAmount, address recipient,
+//           uint64 deadline, uint8 topicTier, address preferredSolver) intent,
+//     bytes intentSig,
+//     tuple(bytes32 intentId, address solver, uint256 outputAmount,
+//           bytes route, uint64 deadline) bid,
+//     bytes bidSig
+//   ) external`,
+//   'function settled(bytes32) view returns (bool)',
+//   'event IntentSettled(bytes32 indexed intentId, address indexed user, address indexed solver, uint256 inputAmount, uint256 outputAmount, uint256 solverFee)',
+// ]
 
-const ERC20_ABI = [
-  'function approve(address spender, uint256 amount) returns (bool)',
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function balanceOf(address) view returns (uint256)',
-]
+// const ERC20_ABI = [
+//   'function approve(address spender, uint256 amount) returns (bool)',
+//   'function allowance(address owner, address spender) view returns (uint256)',
+//   'function balanceOf(address) view returns (uint256)',
+// ]
 
 async function main() {
   const provider   = new ethers.JsonRpcProvider(ARB_SEPOLIA_RPC)
   const signer     = new ethers.Wallet(PRIVATE_KEY, provider)
   const network    = await provider.getNetwork()
-  const settlement = new ethers.Contract(SETTLEMENT_CONTRACT_ADDRESS, SETTLEMENT_ABI, signer)
+  const settlement = new ethers.Contract(SETTLEMENT_CONTRACT_ADDRESS, IntentSettlementABI, signer)
 
   const intentObj = JSON.parse(INTENT_JSON)
   const bidObj    = JSON.parse(BID_JSON)
@@ -73,7 +75,7 @@ async function main() {
   console.log(`[settle] deadline ok — ${intentObj.deadline - now}s remaining`)
 
   // ── Approve inputToken transfer ───────────────────────────────────────────
-  const token = new ethers.Contract(intentObj.inputToken, ERC20_ABI, signer)
+  const token = new ethers.Contract(intentObj.inputToken, MockERC20ABI, signer)
   const allowance = await token.allowance(intentObj.user, SETTLEMENT_CONTRACT_ADDRESS)
 
   if (allowance < BigInt(intentObj.inputAmount)) {
@@ -141,7 +143,7 @@ async function main() {
   console.log(`[settle] gas used: ${receipt.gasUsed}`)
 
   // ── Parse IntentSettled event ─────────────────────────────────────────────
-  const iface  = new ethers.Interface(SETTLEMENT_ABI)
+  const iface  = new ethers.Interface(IntentSettlementABI)
   for (const log of receipt.logs) {
     try {
       const parsed = iface.parseLog(log)
