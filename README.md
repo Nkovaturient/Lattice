@@ -108,6 +108,33 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 
 ---
 
+## Arbitrum Sepolia — mesh → settlement
+
+End-to-end flow is **user** (`scripts/run-user.js`) over GossipSub (same topic as `libp2p/topics.js`) → **solver** (`scripts/run-solver.js`) → optional **`IntentSettlement.settle`**.
+
+1. **Env (repo-root `.env`)** — `PRIVATE_KEY`, `ARB_SEPOLIA_RPC`, `ARB_SEPOLIA_CHAIN_ID=421614`, `SETTLEMENT_CONTRACT_ADDRESS` (or `INTENT_SETTLEMENT_ADDRESS`), and **`REGISTRY_CONTRACT_ADDRESS` or `SOLVER_REGISTRY_ADDRESS`** so the user signs **`nonces(wallet)`**. Skipping registry → nonce `0` → **`Nonce mismatch`** on `settle` after any prior successful settle.
+
+2. **Solver** — `node scripts/run-solver.js`  
+   - With no remote `solverPeers`, the auction uses **local compute** on this node (solo mesh).  
+   - With settlement address set and `AUTO_SETTLE` not `false`, the winner calls [`node/settlement-submit.js`](node/settlement-submit.js) (`submitSettlement`).
+
+3. **User** — `BOOTSTRAP_PEERS=/ip4/…/p2p/<solverPeerId> node scripts/run-user.js`  
+   - Approve `inputToken` for the settlement contract before `settle` (solver pays gas).
+
+4. **Local mesh** — `node scripts/run-mesh.js` (mock pools).
+
+### Operations (honest pitfalls)
+
+Public Sepolia gateways (e.g. `sepolia-rollup.arbitrum.io`) aggressively **429** rate-limit — the solver pulls **multicall**, **gas**, **`settle.staticCall`, `estimateGas`**, **`tx.wait`**, and the pool watcher. **Prefer a keyed provider** (Infura / Alchemy / QuickNode).
+
+The repo configures a gentler ethers client in **[`node/rpc-provider.js`](node/rpc-provider.js)** (`batchMaxCount=1`, tunable **`RPC_POLLING_INTERVAL_MS`**, **`RPC_429_EXTRA_MS`** default long sleep on HTTP 429). **`submitSettlement`** wraps critical calls in **back-off retries**.
+
+If logs show **`settle revert`** with **`require(false)`** or a selector-only hex, the chain often surfaced **no `Error(string)`** — commonly **`SwapRouter.exactInput`** (path / liquidity / token quirks), not gossip. Prefer **keyed RPC + `cast call … settle.staticCall`** (or Tenderly) to isolate. To drop one RPC hop on flaky endpoints, set **`SETTLE_GAS_LIMIT`** (e.g. `800000`) so **`estimateGas`** is skipped after a successful **`staticCall`**.
+
+Maintainership narrative when things fail: mesh + signing can succeed while **`settle` fails** — that’s **orthogonal layers** (P2P vs EVM infra). Showing **decoded revert where possible**, **429 retries**, and a **commercial RPC** proves production thinking.
+
+---
+
 ## Tech stack
 
 | Concern | Choice |

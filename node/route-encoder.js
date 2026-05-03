@@ -1,4 +1,4 @@
-// Track 3.3 — Uniswap v3 route encoding
+// Uniswap v3 route encoding
 // Converts a solver pathfinding result into the ABI-encoded bytes
 // that IntentSettlement.sol passes to the Uniswap v3 SwapRouter.
 //

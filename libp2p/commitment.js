@@ -78,6 +78,10 @@ export class CommitRevealAuction {
     this.reveals     = new Map()  // peerId → { bid, salt }
   }
 
+  /**
+   * Run the two-phase commit-reveal auction.
+   * @returns {Array} Array of revealed bids (empty if none). Caller selects winner.
+   */
   async run() {
     const t0 = Date.now()
 
@@ -91,8 +95,8 @@ export class CommitRevealAuction {
     const phase2Elapsed = Date.now() - t0
     console.log(`[commit] phase 2 done — ${this.reveals.size} reveals in ${phase2Elapsed}ms`)
 
-    // Verify and select winner
-    return this._selectWinner()
+    // Return all revealed bids for caller to select winner
+    return this._getRevealedBids()
   }
 
   async _collectCommitments() {
@@ -168,11 +172,8 @@ export class CommitRevealAuction {
     ])
   }
 
-  _selectWinner() {
-    const minOut = BigInt(this.intent.minOutputAmount)
-    const bids   = [...this.reveals.values()].filter(b => BigInt(b.outputAmount) >= minOut)
-    if (!bids.length) return null
-    bids.sort((a, b) => BigInt(b.outputAmount) > BigInt(a.outputAmount) ? 1 : -1)
-    return bids[0]
+  _getRevealedBids() {
+    // Return all revealed bids; caller filters by minOutputAmount and selects winner
+    return [...this.reveals.values()]
   }
 }

@@ -1,4 +1,4 @@
-// Track 1.1 + 3.1 — Solver node bootstrap with RFQ handler injection
+// Solver node bootstrap with RFQ(Request for Quote) handler injection
 import { createLibp2p } from 'libp2p'
 import { webSockets } from '@libp2p/websockets'
 import { noise } from '@chainsafe/libp2p-noise'

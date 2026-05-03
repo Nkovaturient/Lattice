@@ -1,4 +1,4 @@
-// Track 3.3 — Uniswap v3 solver compute engine
+// Uniswap v3 solver compute engine
 // Maintains an in-memory pool state cache refreshed every block (~12s).
 // Pathfinding: single-hop first, 2-hop via WETH bridge if no direct pool.
 // Route encoding: Uniswap v3 packed path format via route-encoder.js.

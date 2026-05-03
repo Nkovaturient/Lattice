@@ -5,12 +5,17 @@ function domainChainId() {
   return Number.isFinite(n) ? n : 1
 }
 
+function settlementAddressFromEnv() {
+  const fromSettlement = process.env.SETTLEMENT_CONTRACT_ADDRESS?.trim()
+  const fromAlias = process.env.INTENT_SETTLEMENT_ADDRESS?.trim()
+  return fromSettlement ?? fromAlias ?? '0x0000000000000000000000000000000000000000'
+}
+
 export const DOMAIN = {
   name:              'IntentDeFi',
   version:           '1',
   chainId:           domainChainId(),
-  verifyingContract: process.env.SETTLEMENT_CONTRACT_ADDRESS?.trim()
-    ?? '0x0000000000000000000000000000000000000000',
+  verifyingContract: settlementAddressFromEnv(),
 }
 
 export const INTENT_TYPE = {

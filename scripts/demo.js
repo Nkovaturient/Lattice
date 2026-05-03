@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // Gossamer terminal demo — Track 3.3 compute engine in isolation
 // Simulates a full intent → pathfinding → bid pipeline without live RPC
-// (uses mock pool state so you can run with no Infura key needed)
+// (uses mock pool state)
 //
 // Run: node scripts/demo.js
 
 import { ethers } from 'ethers'
-import { initCodec, encodeIntent, decodeIntent, encodeBid, decodeBid } from '../src/sdk/intent-codec.js'
-import { computeIntentId } from '../src/sdk/intent-id.js'
-import { DOMAIN, INTENT_TYPE } from '../src/sdk/domain.js'
-import { buildBid, verifyBid } from '../src/sdk/bid-builder.js'
-import { encodeSingleHop, encodeTwoHop, decodePath, FEE_TIERS, selectFeeTier } from '../src/sdk/route-encoder.js'
-import { estimateOutput, UNISWAP_V3 } from '../src/node/compute-engine.js'
+import { initCodec, encodeIntent, decodeIntent, encodeBid, decodeBid } from '../sdk/intent-codec.js'
+import { computeIntentId } from '../sdk/intent-id.js'
+import { DOMAIN, INTENT_TYPE } from '../sdk/domain.js'
+import { buildBid, verifyBid } from '../sdk/bid-builder.js'
+import { encodeSingleHop, encodeTwoHop, decodePath, FEE_TIERS, selectFeeTier } from '../node/route-encoder.js'
+import { estimateOutput, UNISWAP_V3 } from '../node/compute-engine.js'
 
 // ── Mock pool state (replaces live RPC for demo) ──────────────────────────────
 // USDC(token0, 6dec) / WETH(token1, 18dec) at ~2500 USDC per WETH

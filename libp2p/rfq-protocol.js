@@ -1,4 +1,4 @@
-// Track 3.1 — /defi/rfq/1.0.0 stream protocol
+// /defi/rfq/1.0.0 stream protocol
 // Direct encrypted solver negotiation over yamux streams.
 // Wire format: [4-byte big-endian uint32 length] + [protobuf payload]
 import { encodeIntent, encodeBid, decodeBid, decodeIntent } from '../sdk/intent-codec.js'

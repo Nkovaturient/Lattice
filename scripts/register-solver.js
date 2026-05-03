@@ -37,20 +37,6 @@ if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC || !REGISTRY_CONTRACT_ADDRESS) {
   process.exit(1)
 }
 
-// const REGISTRY_ABI = [
-//   'function register(string peerId, uint8 tier) payable',
-//   'function upgradeTier() payable',
-//   'function isRegistered(address) view returns (bool)',
-//   'function stake(address) view returns (uint256)',
-//   'function solverTier(address) view returns (uint8)',
-//   'function solvers(address) view returns (bool registered, uint8 tier, uint256 stake, uint256 fills, uint256 slashes, string peerId)',
-//   'function MIN_STAKE() view returns (uint256)',
-//   'function TIER0_MIN_STAKE() view returns (uint256)',
-//   'function TIER1_MIN_STAKE() view returns (uint256)',
-//   'function MIN_FILLS_TIER1() view returns (uint256)',
-//   'event SolverRegistered(address indexed solver, string peerId, uint8 tier)',
-// ]
-
 async function main() {
   const provider = new ethers.JsonRpcProvider(ARB_SEPOLIA_RPC)
   const wallet   = new ethers.Wallet(PRIVATE_KEY, provider)

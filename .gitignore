@@ -1,3 +1,8 @@
 node_modules/
 .env
 .DS_Store
+/intent-only.json
+/settlement-pair.json
+/scripts/run-mesh.js
+/scripts/demo.js
+/scripts/benchmark.js

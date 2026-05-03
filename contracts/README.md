@@ -231,6 +231,10 @@ REGISTRY_CONTRACT_ADDRESS=$REGISTRY_CONTRACT_ADDRESS \
 node test/unit/e2e-sepolia.test.mjs
 ```
 
+### Mesh solver + `IntentSettlement.settle`
+
+From the application package root (`../` relative to this folder), `node scripts/run-solver.js` can submit the winning solver bid on-chain via `node/settlement-submit.js` when `SETTLEMENT_CONTRACT_ADDRESS` is set (`AUTO_SETTLE=false` skips the broadcast and keeps `scripts/settle.js` for manual runs). EIP-712 `verifyingContract` accepts `SETTLEMENT_CONTRACT_ADDRESS` or `INTENT_SETTLEMENT_ADDRESS` (see `sdk/domain.js`).
+
 ---
 
 ## Deploy on Arbitrum Mainnet

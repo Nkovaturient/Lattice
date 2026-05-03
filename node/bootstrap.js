@@ -1,4 +1,4 @@
-// Track 1.2 — Bootstrap / rendezvous node
+// Bootstrap / rendezvous node
 import { createLibp2p } from 'libp2p'
 import { webSockets } from '@libp2p/websockets'
 import { noise } from '@chainsafe/libp2p-noise'

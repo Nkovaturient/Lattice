@@ -1,5 +1,6 @@
 // Build + broadcast a real signed intent to the mesh
 import 'dotenv/config'
+import { writeFileSync } from 'fs'
 import { ethers } from 'ethers'
 import { createLibp2p } from 'libp2p'
 import { webSockets } from '@libp2p/websockets'
@@ -15,6 +16,8 @@ import { DOMAIN, INTENT_TYPE } from '../sdk/domain.js'
 import { topicForIntent } from '../libp2p/topics.js'
 import { GOSSIP_CONFIG } from '../libp2p/gossipsub-config.js'
 import { SolverRegistryABI } from '../ABI/SolverRegistryABI.js'
+import { createRatedJsonRpcProvider } from '../node/rpc-provider.js'
+import { serializeIntentRecord } from '../node/settlement-snapshot.js'
 
 // ── Arb Sepolia defaults (Uniswap test tokens) ───────────────────────────────
 const DEFAULT_SWAP = {
@@ -29,6 +32,7 @@ const {
   PRIVATE_KEY,
   ARB_SEPOLIA_RPC,
   REGISTRY_CONTRACT_ADDRESS,
+  SOLVER_REGISTRY_ADDRESS,
   BOOTSTRAP_PEERS,
   INPUT_TOKEN,
   OUTPUT_TOKEN,
@@ -86,8 +90,9 @@ async function waitForGossipsubMesh(pubsub, topic, { timeoutMs = 45_000, interva
 }
 
 async function main() {
-  const provider = new ethers.JsonRpcProvider(ARB_SEPOLIA_RPC)
-  const wallet   = new ethers.Wallet(PRIVATE_KEY, provider)
+  const chainIdNum = Number(process.env.ARB_SEPOLIA_CHAIN_ID ?? process.env.CHAIN_ID ?? 421614)
+  const provider   = createRatedJsonRpcProvider(ARB_SEPOLIA_RPC, chainIdNum)
+  const wallet     = new ethers.Wallet(PRIVATE_KEY, provider)
   const network  = await provider.getNetwork()
   const chainId = Number(network.chainId)
   if (chainId !== DOMAIN.chainId) {
@@ -103,12 +108,17 @@ async function main() {
   await initCodec()
 
   let nonce = 0n
-  const registryAddr = REGISTRY_CONTRACT_ADDRESS?.trim()
+  const registryAddr =
+    REGISTRY_CONTRACT_ADDRESS?.trim()
+    ?? SOLVER_REGISTRY_ADDRESS?.trim()
   if (registryAddr) {
     const registry = new ethers.Contract(registryAddr, SolverRegistryABI, provider)
     nonce = await registry.nonces(wallet.address)
+    console.log(`[user] registry nonce: ${nonce} (${registryAddr.slice(0, 10)}…)`)
   } else {
-    console.warn('[user] REGISTRY_CONTRACT_ADDRESS not set — using nonce 0 (set for real settlement)')
+    console.warn(
+      '[user] REGISTRY_CONTRACT_ADDRESS / SOLVER_REGISTRY_ADDRESS unset — using nonce 0 (settlement will revert if on-chain nonce differs)'
+    )
   }
 
   const intentData = {
@@ -127,6 +137,15 @@ async function main() {
   const signature = await wallet.signTypedData(DOMAIN, INTENT_TYPE, intentData)
   const intentId  = computeIntentId(intentData)
   const intent    = { ...intentData, intentId, signature }
+
+  const dumpIntent = process.env.DUMP_INTENT_JSON?.trim()
+  if (dumpIntent) {
+    writeFileSync(
+      dumpIntent,
+      `${JSON.stringify({ intent: serializeIntentRecord(intent) }, null, 2)}\n`,
+    )
+    console.log(`[user] intent snapshot (no bid) → ${dumpIntent}`)
+  }
 
   console.log(`[user] intentId: ${intentId.slice(0, 18)}…`)
   console.log(`[user] deadline: ${new Date(intentData.deadline * 1000).toISOString()}`)
