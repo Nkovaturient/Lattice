@@ -82,12 +82,12 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 - [x] **2.3** Validation pipeline — sig verify → deadline → registry cache (60s TTL + event invalidation)
 
 ### Phase 3 — Solver RFQ & Auction Engine
-- [ ] **3.1** `/defi/rfq/1.0.0` stream protocol — direct encrypted solver negotiation, sealed bids
-- [ ] **3.2** Auction coordinator — 80ms hard deadline, `Promise.race`, parallel RFQ broadcast
-- [ ] **3.3** Solver compute engine — DEX pathfinding (Uniswap v3 / Curve), route encoding
+- [x] **3.1** `/defi/rfq/1.0.0` stream protocol — direct encrypted solver negotiation, sealed bids
+- [x] **3.2** Auction coordinator — 80ms hard deadline, `Promise.race`, parallel RFQ broadcast
+- [x] **3.3** Solver compute engine — DEX pathfinding (Uniswap v3 / Curve), route encoding
 
 ### Phase 4 — EVM Settlement & Incentives
-- [ ] **4.1** `IntentSettlement.sol` — verify EIP-712 intent + bid, execute route, pay solver
+- [x] **4.1** `IntentSettlement.sol` — verify EIP-712 intent + bid, execute route, pay solver
 - [ ] **4.2** Solver incentive model — fee split, slashing conditions, reputation → tier access
 
 ### Phase 5 — Hardening & Launch
@@ -121,7 +121,6 @@ End-to-end flow is **user** (`scripts/run-user.js`) over GossipSub (same topic a
 3. **User** — `BOOTSTRAP_PEERS=/ip4/…/p2p/<solverPeerId> node scripts/run-user.js`  
    - Approve `inputToken` for the settlement contract before `settle` (solver pays gas).
 
-4. **Local mesh** — `node scripts/run-mesh.js` (mock pools).
 
 ### Operations (honest pitfalls)
 
