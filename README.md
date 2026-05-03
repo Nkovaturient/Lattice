@@ -1,14 +1,51 @@
+<div align="center">
+        
 # Lattice
 
 **Private solver mesh. Intents settled before the chain sees them.**
+
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/Status-Alpha-blue?style=for-the-badge" alt="Status"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Built%20with-js--libp2p-FF69B4?style=for-the-badge" alt="js-libp2p"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Chain-Arbitrum%20Sepolia-28A0F0?style=for-the-badge" alt="Arbitrum"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Latency-%3C100ms-success?style=for-the-badge" alt="Latency"></a>
+</p>
 
 <div align="center">
 <img src="https://github.com/user-attachments/assets/2553ca98-6769-406f-af53-49162d9b99d2" height="500" />
 </div>
 
-Lattice is an intent-based DeFi coordination layer built on js-libp2p. Users sign what they want. Solvers compete privately to fill it. The best solution lands on-chain. No mempool exposure. No MEV leak. No trusted relayer.
+</div>
 
-> It earns the name on three levels — gossip (GossipSub is the propagation engine), lattice as in ultra-fine mesh fabric (the solver subnet topology), and the connotation of something fast and nearly invisible. That last part is exactly what good infrastructure feels like.
+
+# Intro
+
+**Lattice** is an **intent-based DeFi coordination layer** built on **js-libp2p**.  
+
+Users sign what they want. Solvers compete **privately** to fill it. The best solution lands on-chain. 
+
+**No mempool exposure. No MEV leaks. No trusted relayer.**
+
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <img width="500" alt="libp2p" src="https://github.com/user-attachments/assets/fc0cca6c-8fba-43d1-bfde-d957a45185e6" />
+        <!-- <br><strong>js-libp2p Powered</strong> -->
+      </td>
+      <td align="center">
+        <img width="500" alt="Lattice in Action" src="https://github.com/user-attachments/assets/7c571754-c240-424b-8081-e5ba893c4995" />
+        <!-- <br><strong>Lattice Mesh Demo</strong> -->
+      </td>
+    </tr>
+  </table>
+</div>
+
+
+> It earns the name on three levels — gossip (GossipSub is the propagation engine), lattice as in ultra-fine mesh fabric (the solver subnet topology), and the connotation of something fast and nearly invisible.
+
+> That last part is exactly what good infrastructure feels like.
 
 ---
 
@@ -22,19 +59,17 @@ Lattice moves coordination entirely peer-to-peer: intents propagate through an e
 
 ## How it works
 
-```
-User signs an intent (EIP-712)
-        ↓
-GossipSub propagates it across the solver mesh
-        ↓
-Solvers compute competing solutions privately
-        ↓
-Best bid wins the 80ms auction window
-        ↓
-Solver submits solution → IntentSettlement.sol verifies + executes
+```mermaid
+flowchart TD
+    A[User signs Intent<br/>EIP-712] --> B[GossipSub Propagation<br/>across Solver Mesh]
+    B --> C[Solvers compute solutions privately]
+    C --> D[80ms Auction Window]
+    D --> E[Winning Solver submits solution]
+    E --> F[IntentSettlement.sol<br/>Verifies + Executes]
 ```
 
-The networking layer is **js-libp2p** — Noise-encrypted connections, yamux multiplexing, Kademlia DHT for discovery, GossipSub for intent propagation. The trust layer is **EVM** — solver staking, slashing, and on-chain settlement via EIP-712 verified signatures.
+- The _Networking_ layer is **js-libp2p** — Noise-encrypted connections, yamux multiplexing, Kademlia DHT for discovery, GossipSub for intent propagation. 
+- The _Trust_ layer is **EVM** — solver staking, slashing, and on-chain settlement via EIP-712 verified signatures.
 
 ---
 
