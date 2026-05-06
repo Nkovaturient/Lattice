@@ -2,7 +2,7 @@
         
 # Lattice
 
-**Private solver mesh. Intents settled before the chain sees them.**
+**Private solver mesh powered by Js-libp2p. Intents settled before the chain sees them.**
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/Status-Alpha-blue?style=for-the-badge" alt="Status"></a>
@@ -27,6 +27,25 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
 **No mempool exposure. No MEV leaks. No trusted relayer.**
 
 
+> It earns the name on three levels — gossip (GossipSub is the propagation engine), lattice as in ultra-fine mesh fabric (the solver subnet topology), and the connotation of something fast and nearly invisible.
+
+> That last part is exactly what good infrastructure feels like.
+
+
+# The problem it solves
+
+- Modern DeFi leaks intent data too early. The moment a swap hits a public RPC or mempool, searchers can front-run it. Existing solver networks patch this with centralized off-chain APIs — which defeats the point.
+
+- Lattice moves coordination entirely peer-to-peer: intents propagate through an encrypted solver mesh, auctions resolve in under 100ms, and only the winning solution touches the chain.
+
+
+
+# DEMO
+
+[Watch Demo](https://teal-secondary-antelope-34.mypinata.cloud/ipfs/bafybeief2j7zoo4dw4czinwzaumgfyzahwex5vjmny2a4gbrpcfidmgohe)
+
+> For demonstration, Lattice runs as a local multi-node simulation entirely in the terminal — spin up one bootstrap node, two or three solver nodes, and a user node using scripts, then fire a test intent through the gossip mesh using a simple CLI script that calls buildAndSignIntent() with a hardcoded wallet, publishes it to the GossipSub mesh, and prints each hop in real-time: intent received → validated → solver bids → auction winner → settlement tx hash. That's the demo — watching an intent travel from user signature to on-chain settlement in under 100ms, fully logged in the terminal, no browser needed.
+
 <div align="center">
   <table>
     <tr>
@@ -42,21 +61,6 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
   </table>
 </div>
 
-
-> It earns the name on three levels — gossip (GossipSub is the propagation engine), lattice as in ultra-fine mesh fabric (the solver subnet topology), and the connotation of something fast and nearly invisible.
-
-> That last part is exactly what good infrastructure feels like.
-
----
-
-## The problem it solves
-
-Modern DeFi leaks intent data too early. The moment a swap hits a public RPC or mempool, searchers can front-run it. Existing solver networks patch this with centralized off-chain APIs — which defeats the point.
-
-Lattice moves coordination entirely peer-to-peer: intents propagate through an encrypted solver mesh, auctions resolve in under 100ms, and only the winning solution touches the chain.
-
----
-
 ## How it works
 
 ```mermaid
@@ -71,7 +75,6 @@ flowchart TD
 - The _Networking_ layer is **js-libp2p** — Noise-encrypted connections, yamux multiplexing, Kademlia DHT for discovery, GossipSub for intent propagation. 
 - The _Trust_ layer is **EVM** — solver staking, slashing, and on-chain settlement via EIP-712 verified signatures.
 
----
 
 ## Architecture at a glance
 
@@ -85,7 +88,6 @@ flowchart TD
 | Settlement | `IntentSettlement.sol` | On-chain verify, execute, pay solver |
 | Trust anchor | `SolverRegistry.sol` | Stake, register, slash — PeerID ↔ EVM binding |
 
----
 
 ## Latency budget (80ms auction window)
 
@@ -101,8 +103,6 @@ Total                             ~80ms
 
 Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is non-negotiable for the budget to hold.
 
-> For demonstration, Lattice runs as a local multi-node simulation entirely in the terminal — you spin up one bootstrap node, two or three solver nodes, and a user node using the existing src/node/ scripts, then fire a test intent through the gossip mesh using a simple CLI script in scripts/ that calls buildAndSignIntent() with a hardcoded wallet, publishes it to the GossipSub mesh, and prints each hop in real-time: intent received → validated → solver bids → auction winner → settlement tx hash. That's the demo — watching an intent travel from user signature to on-chain settlement in under 100ms, fully logged in the terminal, no browser needed. When the system matures, a minimal frontend (likely a single-page React or plain HTML dApp) gets added purely as a wallet-connect interface for signing intents — but the protocol itself is the product, and the terminal demo proves it works.
----
 
 ## Roadmap
 
@@ -129,7 +129,6 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 - [ ] **5.1** Latency benchmarking harness — per-hop timing, p99 profiling, geo simulation
 - [ ] **5.2** MEV resistance audit — timing attacks, solver collusion vectors, commit-reveal analysis
 
----
 
 ## Design decisions (locked)
 
