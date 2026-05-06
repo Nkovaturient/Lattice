@@ -55,6 +55,17 @@ contract IntentSettlement is ReentrancyGuard {
     /// @dev Actual output token amount from the swap, recorded for on-chain overpromise checks.
     mapping(bytes32 => uint256) public settlementActualOutput;
 
+    // ── Custom errors ─────────────────────────────────────────────────────────
+
+    /// Route bytes are not a valid packed Uniswap v3 path (must be 43 + 23*n bytes).
+    error InvalidRouteLength(uint256 length);
+
+    /// Route first token does not match intent.inputToken.
+    error RouteInputTokenMismatch(address routeStart, address expected);
+
+    /// Route last token does not match intent.outputToken.
+    error RouteOutputTokenMismatch(address routeEnd, address expected);
+
     // ── Events ────────────────────────────────────────────────────────────────
 
     event IntentSettled(
@@ -127,6 +138,8 @@ contract IntentSettlement is ReentrancyGuard {
         );
         require(registry.solverTier(msg.sender) >= intent.topicTier, "Tier mismatch");
 
+        _validateRoute(bid.route, intent.inputToken, intent.outputToken);
+
         // Effects before any external call (CEI) — blocks reentrant double-settlement
         settled[intentId] = true;
         registry.incrementNonce(intent.user);
@@ -164,6 +177,19 @@ contract IntentSettlement is ReentrancyGuard {
             intent.inputAmount,
             actualOutput
         );
+    }
+
+    // ── Views ─────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Returns the current intent nonce for a user.
+     * Storage lives on SolverRegistry in v1 (internal detail). This passthrough
+     * lets every client read through the settlement address — the EIP-712
+     * verifyingContract — instead of coupling to the registry address.
+     * In v2, storage moves here; clients require no change.
+     */
+    function nonces(address user) external view returns (uint256) {
+        return registry.nonces(user);
     }
 
     // ── Slash helpers ─────────────────────────────────────────────────────────
@@ -213,6 +239,29 @@ contract IntentSettlement is ReentrancyGuard {
         outputToken.safeTransfer(msg.sender, solverFee);
         IERC20(inputToken).forceApprove(SWAP_ROUTER, 0);
         emit IntentSettled(intentId, user, msg.sender, inputAmount, actualOutput, solverFee);
+    }
+
+    /**
+     * Validate packed Uniswap v3 path well-formedness and token endpoint alignment.
+     * Each hop: tokenA(20) + fee(3) + tokenB(20); consecutive hops share the bridge token.
+     * Valid lengths: 43 (1-hop) or 43 + 23*n (n additional hops).
+     * Reverts with custom errors so callers can diagnose route vs signature issues distinctly.
+     */
+    function _validateRoute(bytes calldata route, address inputToken, address outputToken) internal pure {
+        uint256 len = route.length;
+        if (len < 43 || (len - 43) % 23 != 0) revert InvalidRouteLength(len);
+
+        address routeStart;
+        address routeEnd;
+        assembly {
+            // first 20 bytes = tokenIn
+            routeStart := shr(96, calldataload(route.offset))
+            // last 20 bytes = tokenOut (starts at offset + len - 20)
+            routeEnd   := shr(96, calldataload(add(route.offset, sub(len, 20))))
+        }
+
+        if (routeStart != inputToken)  revert RouteInputTokenMismatch(routeStart, inputToken);
+        if (routeEnd   != outputToken) revert RouteOutputTokenMismatch(routeEnd, outputToken);
     }
 
     function _domainHash(bytes32 structHash) internal view returns (bytes32) {

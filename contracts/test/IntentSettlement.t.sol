@@ -358,6 +358,134 @@ contract IntentSettlementTest is Test {
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
+    // ── Nonce passthrough tests ───────────────────────────────────────────
+
+    function test_NoncePassthroughMatchesRegistry() public view {
+        assertEq(settlement.nonces(user), registry.nonces(user));
+    }
+
+    function test_NonceIncrementAfterSettle() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.outputAmount = 500_000_000_000_000_000;
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        assertEq(settlement.nonces(user), 0);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        assertEq(settlement.nonces(user), 1);
+        assertEq(settlement.nonces(user), registry.nonces(user));
+    }
+
+    function test_RevertNonceMismatch() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        intent.nonce = 999; // wrong nonce
+
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        vm.expectRevert("Nonce mismatch");
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    // ── Route validation custom error tests ───────────────────────────────
+
+    function test_RevertInvalidRouteLength() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.route = abi.encodePacked(intent.inputToken, uint24(3000)); // 23 bytes — invalid
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlement.InvalidRouteLength.selector, bid.route.length));
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_RevertRouteInputTokenMismatch() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+
+        address wrongToken = makeAddr("wrongIn");
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.route = abi.encodePacked(wrongToken, uint24(3000), intent.outputToken);
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IntentSettlement.RouteInputTokenMismatch.selector,
+                wrongToken,
+                intent.inputToken
+            )
+        );
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_RevertRouteOutputTokenMismatch() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+
+        address wrongToken = makeAddr("wrongOut");
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.route = abi.encodePacked(intent.inputToken, uint24(3000), wrongToken);
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IntentSettlement.RouteOutputTokenMismatch.selector,
+                wrongToken,
+                intent.outputToken
+            )
+        );
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_TwoHopRouteValid() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        address bridgeToken = makeAddr("bridge");
+        // 66-byte two-hop path (43 + 23)
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.route = abi.encodePacked(intent.inputToken, uint24(500), bridgeToken, uint24(3000), intent.outputToken);
+        bid.outputAmount = 500_000_000_000_000_000;
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
     function _makeIntent() internal view returns (IntentTypes.Intent memory) {
         IntentTypes.Intent memory i;
         i.user            = user;
