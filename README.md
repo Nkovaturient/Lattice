@@ -145,21 +145,80 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 
 ## Arbitrum Sepolia — mesh → settlement
 
-End-to-end flow is **user** (`scripts/run-user.js`) over GossipSub (same topic as `libp2p/topics.js`) → **solver** (`scripts/run-solver.js`) → optional **`IntentSettlement.settle`**.
+End-to-end flow is **user** (`scripts/run-user.js`) over GossipSub → **solver** (`scripts/run-solver.js`) → optional **`IntentSettlement.settle`**.
 
-1. **Env (repo-root `.env`)** — `PRIVATE_KEY`, `ARB_SEPOLIA_RPC`, `ARB_SEPOLIA_CHAIN_ID=421614`, `SETTLEMENT_CONTRACT_ADDRESS` (or `INTENT_SETTLEMENT_ADDRESS`), and **`REGISTRY_CONTRACT_ADDRESS` or `SOLVER_REGISTRY_ADDRESS`** so the user signs **`nonces(wallet)`**. Skipping registry → nonce `0` → **`Nonce mismatch`** on `settle` after any prior successful settle.
+### Prerequisites (one-time per user wallet)
 
-2. **Solver** — `node scripts/run-solver.js`  
-   - With no remote `solverPeers`, the auction uses **local compute** on this node (solo mesh).  
-   - With settlement address set and `AUTO_SETTLE` not `false`, the winner calls [`node/settlement-submit.js`](node/settlement-submit.js) (`submitSettlement`).
+**Token approval is required before your first intent settles.** The solver calls `settle()` which pulls tokens from your wallet via `transferFrom`. Approve once (or with a high allowance) and you won't need to repeat until exhausted:
 
-3. **User** — `BOOTSTRAP_PEERS=/ip4/…/p2p/<solverPeerId> node scripts/run-user.js`  
-   - Approve `inputToken` for the settlement contract before `settle` (solver pays gas).
+```bash
+# Approve USDC (6 decimals) for IntentSettlement
+cast send 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d \
+  "approve(address,uint256)" \
+  $SETTLEMENT_CONTRACT_ADDRESS \
+  1000000000 \  # 1000 USDC — adjust as needed
+  --rpc-url "$ARB_SEPOLIA_RPC" \
+  --private-key "$PRIVATE_KEY"
+```
+
+### Environment (repo-root `.env`)
+
+```bash
+PRIVATE_KEY=0x...
+ARB_SEPOLIA_RPC=https://arb-sepolia.g.alchemy.com/v2/YOUR_KEY
+ARB_SEPOLIA_CHAIN_ID=421614
+
+# Contract addresses (both required)
+SETTLEMENT_CONTRACT_ADDRESS=0x...   # IntentSettlement — nonces + settle
+REGISTRY_CONTRACT_ADDRESS=0x...     # SolverRegistry — solver stakes
+
+# Optional solver tuning
+# USE_QUOTER=1                      # call QuoterV2 for honest bids (adds ~10-30ms)
+# SOLVER_MARGIN_BPS=10              # shade bids by 0.10% for heterogeneity
+# RFQ_DIAL_TIMEOUT_MS=60            # default 60ms WS; set 40 for QUIC
+```
+
+### Run the solver
+
+```bash
+node scripts/run-solver.js
+# Logs its PeerID and multiaddr — copy for user's BOOTSTRAP_PEERS
+```
+
+With `SETTLEMENT_CONTRACT_ADDRESS` set and `AUTO_SETTLE` not `false`, the winning bid auto-submits on-chain.
+
+### Run the user
+
+```bash
+BOOTSTRAP_PEERS=/ip4/127.0.0.1/tcp/9000/ws/p2p/<solverPeerId> \
+  node scripts/run-user.js
+```
+
+The user reads `settlement.nonces(wallet)` to sign the correct nonce. If the deployed contract lacks the `nonces()` passthrough (pre-v1.1), set `REGISTRY_CONTRACT_ADDRESS` as fallback.
+
+### Demo
 
 
-### Operations (honest pitfalls)
+| Goal | Contract | Notes |
+|---|---|---|
+| Full **`settle` tx** on Sepolia without SwapRouter failures | **`MockIntentSettlement`** | Deploy via `forge script ... deployMock(address)` (see [`contracts/README.md`](contracts/README.md)). Say: *coordination + trust layer is real; AMM execution is pluggable.* |
+| Real Uniswap path | **`IntentSettlement`** | Often hits empty / illiquid pools on testnet — use for infra debugging, not as the only demo. |
+| Credible **mesh** evidence | 2–3 solvers | Different `SOLVER_PORT`, shared `BOOTSTRAP_PEERS` to first solver’s multiaddr. One solver + one user is RFQ/local-compute valid but not a full mesh story. |
 
-Public Sepolia gateways (e.g. `sepolia-rollup.arbitrum.io`) aggressively **429** rate-limit — the solver pulls **multicall**, **gas**, **`settle.staticCall`, `estimateGas`**, **`tx.wait`**, and the pool watcher. **Prefer a keyed provider** (Infura / Alchemy / QuickNode).
+
+### Troubleshooting
+
+| Error | Cause | Fix |
+|---|---|---|
+| `execution reverted (no data)` on `nonces()` | Deployed contract lacks `nonces()` passthrough | Redeploy contract OR set `REGISTRY_CONTRACT_ADDRESS` |
+| `Nonce mismatch` | Intent signed with stale nonce | Re-run `run-user.js` (reads fresh nonce) |
+| `transferFrom` reverts | User hasn't approved settlement | Run approval command above |
+| `Solver not registered` | Solver wallet not in registry | Run `node scripts/register-solver.js` |
+| HTTP 429 from RPC | Rate limited | Use keyed RPC; increase `RPC_429_EXTRA_MS` |
+
+### Operations notes
+
+Public Sepolia gateways aggressively **429** rate-limit. **Prefer a keyed provider** (Infura / Alchemy / QuickNode).
 
 The repo configures a gentler ethers client in **[`node/rpc-provider.js`](node/rpc-provider.js)** (`batchMaxCount=1`, tunable **`RPC_POLLING_INTERVAL_MS`**, **`RPC_429_EXTRA_MS`** default long sleep on HTTP 429). **`submitSettlement`** wraps critical calls in **back-off retries**.
 

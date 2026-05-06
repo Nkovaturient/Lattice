@@ -6,7 +6,7 @@
 // Injected into solver.js as config.computeSolution — keeps DEX logic
 // separate from p2p transport logic.
 import { ethers } from 'ethers'
-import { encodeSingleHop, encodeTwoHop, selectFeeTier, FEE_TIERS } from '../node/route-encoder.js'
+import { encodeSingleHop, encodeTwoHop, selectFeeTier, FEE_TIERS, validatePathEndpoints } from '../node/route-encoder.js'
 import { buildBid } from '../sdk/bid-builder.js'
 
 // ── Uniswap v3 ABIs (minimal — only what we read) ────────────────────────────
@@ -250,6 +250,50 @@ export class PoolStateCache {
   }
 }
 
+// ── QuoterV2 ──────────────────────────────────────────────────────────────────
+
+const QUOTER_V2_ADDRESS = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e'
+
+const QUOTER_V2_ABI = [
+  'function quoteExactInput(bytes path, uint256 amountIn) external returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)',
+]
+
+/**
+ * Call QuoterV2.quoteExactInput as a staticCall (does not submit a tx).
+ * Returns the on-chain output amount, or null if the quote reverts.
+ *
+ * @param {ethers.Provider} provider
+ * @param {Uint8Array|string} path  packed v3 path
+ * @param {bigint} amountIn
+ * @returns {Promise<bigint|null>}
+ */
+export async function quoteExactInput(provider, path, amountIn) {
+  const quoter = new ethers.Contract(QUOTER_V2_ADDRESS, QUOTER_V2_ABI, provider)
+  try {
+    const [amountOut] = await quoter.quoteExactInput.staticCall(
+      typeof path === 'string' ? path : ethers.hexlify(path),
+      amountIn
+    )
+    return BigInt(amountOut.toString())
+  } catch (e) {
+    console.warn(`[quoter] quoteExactInput reverted: ${e?.shortMessage ?? e?.message}`)
+    return null
+  }
+}
+
+/**
+ * Apply SOLVER_MARGIN_BPS shading to a quoted output so solvers don't
+ * collapse to the exact same bid when Quoter state is shared.
+ *
+ * @param {bigint} amount  raw quoted amount
+ * @param {number} marginBps  basis points to shade (default from env)
+ * @returns {bigint}
+ */
+export function applySolverMargin(amount, marginBps = Number(process.env.SOLVER_MARGIN_BPS ?? 0)) {
+  if (marginBps <= 0) return amount
+  return amount - (amount * BigInt(marginBps)) / 10_000n
+}
+
 // ── Output estimation ─────────────────────────────────────────────────────────
 
 /**
@@ -297,13 +341,18 @@ export function estimateOutput(poolState, tokenIn, amountIn) {
  * Pathfinding strategy (v1 — Uniswap v3 only):
  *   1. Try direct single-hop pool for each fee tier (100 → 500 → 3000 → 10000)
  *   2. If no direct pool or output < minOutputAmount, try 2-hop via WETH bridge
- *   3. Return best route, or null if nothing clears minOutputAmount
+ *   3. Optionally call QuoterV2 for a more honest bid (env USE_QUOTER=1)
+ *   4. Apply SOLVER_MARGIN_BPS shading for bid heterogeneity
+ *   5. Return best route, or null if nothing clears minOutputAmount
  *
  * @param {ethers.Signer}  solverSigner   solver's EVM wallet (for bid signing)
  * @param {PoolStateCache} poolCache      pre-warmed state cache
+ * @param {ethers.Provider} [provider]   required when USE_QUOTER=1
  * @returns {Function}  computeSolution(intent) → solution | null
  */
-export function createComputeEngine(solverSigner, poolCache) {
+export function createComputeEngine(solverSigner, poolCache, provider) {
+  const useQuoter = process.env.USE_QUOTER === '1'
+
   return async function computeSolution(intent) {
     const weth = poolCache.wrappedNative
     if (weth == null) {
@@ -323,19 +372,17 @@ export function createComputeEngine(solverSigner, poolCache) {
     // ── 1. Single-hop: try each fee tier, keep best ────────────────────────
     let bestOutput = 0n
     let bestRoute  = null
-    let bestFee    = null
 
     for (const fee of [FEE_TIERS.LOWEST, FEE_TIERS.LOW, FEE_TIERS.MEDIUM, FEE_TIERS.HIGH]) {
       const poolAddr = await poolCache.resolvePool(inputToken, outputToken, fee)
       if (!poolAddr) continue
 
       const state = poolCache.get(poolAddr)
-      if (!state) continue  // not cached yet — skip this tier
+      if (!state) continue
 
       const estimated = estimateOutput(state, inputToken, amountIn)
       if (estimated > bestOutput) {
         bestOutput = estimated
-        bestFee    = fee
         bestRoute  = encodeSingleHop(inputToken, fee, outputToken)
       }
     }
@@ -371,21 +418,55 @@ export function createComputeEngine(solverSigner, poolCache) {
       return null
     }
 
-    // ── 4. Build + sign the bid ────────────────────────────────────────────
-    const { bidObj, encodedBid } = await buildBid(
+    // ── 4. Path endpoint validation ────────────────────────────────────────
+    try {
+      validatePathEndpoints(bestRoute, inputToken, outputToken)
+    } catch (e) {
+      console.error(`[compute] path validation failed: ${e.message}`)
+      return null
+    }
+
+    // ── 5. QuoterV2 (opt-in via USE_QUOTER=1) ─────────────────────────────
+    let finalOutput = bestOutput
+    if (useQuoter && provider) {
+      const t0 = Date.now()
+      const quoted = await quoteExactInput(provider, bestRoute, amountIn)
+      const ms = Date.now() - t0
+      if (quoted === null) {
+        console.warn(`[compute] quoter reverted — falling back to estimateOutput (${ms}ms)`)
+      } else {
+        console.log(`[compute] quoter: ${quoted} (${ms}ms)`)
+        finalOutput = quoted
+      }
+    }
+
+    if (finalOutput < minOut) {
+      console.log(`[compute] post-quoter output ${finalOutput} < min ${minOut} — cannot fill`)
+      return null
+    }
+
+    // ── 6. Apply solver margin (bid heterogeneity) ─────────────────────────
+    const shadedOutput = applySolverMargin(finalOutput)
+    if (shadedOutput < minOut) {
+      console.log(`[compute] post-margin output ${shadedOutput} < min ${minOut} — cannot fill`)
+      return null
+    }
+
+    // ── 7. Build + sign the bid ────────────────────────────────────────────
+    const { bidObj } = await buildBid(
       solverSigner,
       intent,
       {
-        outputAmount: bestOutput.toString(),
+        outputAmount: shadedOutput.toString(),
         encodedRoute: bestRoute,
       }
     )
 
-    console.log(`[compute] filled — output: ${bestOutput}, route: ${bestRoute.length}B`)
+    console.log(`[compute] filled — output: ${shadedOutput}${useQuoter ? ' (quoter)' : ''}, route: ${bestRoute.length}B`)
 
     return {
       solverAddress: await solverSigner.getAddress(),
-      outputAmount:  bestOutput.toString(),
+      outputAmount:  shadedOutput.toString(),
       encodedRoute:  bestRoute,
       signature:     bidObj.signature,
     }

@@ -89,6 +89,30 @@ export function registerRFQHandler(node, computeSolution) {
   })
 }
 
+// ── Transport-aware RFQ timeout ───────────────────────────────────────────────
+
+/**
+ * RFQ_DIAL_TIMEOUT_MS defaults:
+ *   WebSocket cold dial ~50ms → 60ms budget leaves 20ms coordinator window.
+ *   QUIC 0-RTT cold dial ~30ms → 40ms budget leaves ~40ms coordinator window.
+ *   Set RFQ_DIAL_TIMEOUT_MS in env to override for either transport.
+ *   When Phase 6.2 (QUIC transport) lands, lower the per-connection default
+ *   based on resolved transport at dial time.
+ */
+const RFQ_DIAL_TIMEOUT_MS = Number(process.env.RFQ_DIAL_TIMEOUT_MS ?? 60)
+
+// Pre-warm tracking: record last successful dial time per peer.
+// Used for future per-peer adaptive timeout (QUIC Phase 6.2 hook point).
+const _lastDialMs = new Map()
+
+export function recordDialSuccess(peerId) {
+  _lastDialMs.set(peerId.toString(), Date.now())
+}
+
+export function isConnectionPreWarmed(peerId) {
+  return _lastDialMs.has(peerId.toString())
+}
+
 // ── Coordinator side — outbound RFQ to one solver ────────────────────────────
 
 /**
@@ -96,15 +120,17 @@ export function registerRFQHandler(node, computeSolution) {
  * and return the decoded bid — or null on timeout / any error.
  *
  * Called in parallel across all solver peers by auction.js (Track 3.2).
- * 60ms AbortSignal leaves 20ms for the coordinator to select the winner.
+ * Timeout is env-configurable via RFQ_DIAL_TIMEOUT_MS (default 60ms for WS,
+ * ~40ms recommended for QUIC once Phase 6.2 lands).
  */
 export async function requestBid(node, peerId, intent) {
   let stream
   try {
-    // Reuses pre-warmed Noise connection (~2ms). Cold dial = ~50ms = budget bust.
+    // Reuses pre-warmed Noise connection (~2ms). Cold WS dial = ~50ms = budget bust.
     stream = await node.dialProtocol(peerId, RFQ_PROTOCOL, {
-      signal: AbortSignal.timeout(60),
+      signal: AbortSignal.timeout(RFQ_DIAL_TIMEOUT_MS),
     })
+    recordDialSuccess(peerId)
 
     // 1. Send intent
     const intentBytes = await encodeIntent(intent)

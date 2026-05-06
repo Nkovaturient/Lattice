@@ -15,9 +15,11 @@ import { computeIntentId } from '../sdk/intent-id.js'
 import { DOMAIN, INTENT_TYPE } from '../sdk/domain.js'
 import { topicForIntent } from '../libp2p/topics.js'
 import { GOSSIP_CONFIG } from '../libp2p/gossipsub-config.js'
+import { IntentSettlementABI } from '../ABI/IntentSettlementABI.js'
 import { SolverRegistryABI } from '../ABI/SolverRegistryABI.js'
 import { createRatedJsonRpcProvider } from '../node/rpc-provider.js'
 import { serializeIntentRecord } from '../node/settlement-snapshot.js'
+import { attachMeshMonitor, publishWithFallback, logMeshMetrics } from '../node/mesh-monitor.js'
 
 // ── Arb Sepolia defaults (Uniswap test tokens) ───────────────────────────────
 const DEFAULT_SWAP = {
@@ -31,6 +33,8 @@ const DEFAULT_SWAP = {
 const {
   PRIVATE_KEY,
   ARB_SEPOLIA_RPC,
+  SETTLEMENT_CONTRACT_ADDRESS,
+  INTENT_SETTLEMENT_ADDRESS,
   REGISTRY_CONTRACT_ADDRESS,
   SOLVER_REGISTRY_ADDRESS,
   BOOTSTRAP_PEERS,
@@ -108,17 +112,26 @@ async function main() {
   await initCodec()
 
   let nonce = 0n
-  const registryAddr =
-    REGISTRY_CONTRACT_ADDRESS?.trim()
-    ?? SOLVER_REGISTRY_ADDRESS?.trim()
-  if (registryAddr) {
-    const registry = new ethers.Contract(registryAddr, SolverRegistryABI, provider)
-    nonce = await registry.nonces(wallet.address)
-    console.log(`[user] registry nonce: ${nonce} (${registryAddr.slice(0, 10)}…)`)
+  const settlementAddr =
+    SETTLEMENT_CONTRACT_ADDRESS?.trim()
+    ?? INTENT_SETTLEMENT_ADDRESS?.trim()
+  if (settlementAddr) {
+    const settlementContract = new ethers.Contract(settlementAddr, IntentSettlementABI, provider)
+    nonce = await settlementContract.nonces(wallet.address)
+    console.log(`[user] settlement nonce: ${nonce} (${settlementAddr.slice(0, 10)}…)`)
   } else {
-    console.warn(
-      '[user] REGISTRY_CONTRACT_ADDRESS / SOLVER_REGISTRY_ADDRESS unset — using nonce 0 (settlement will revert if on-chain nonce differs)'
-    )
+    const registryAddr =
+      REGISTRY_CONTRACT_ADDRESS?.trim()
+      ?? SOLVER_REGISTRY_ADDRESS?.trim()
+    if (registryAddr) {
+      const registry = new ethers.Contract(registryAddr, SolverRegistryABI, provider)
+      nonce = await registry.nonces(wallet.address)
+      console.log(`[user] registry nonce (fallback): ${nonce} (${registryAddr.slice(0, 10)}…)`)
+    } else {
+      console.warn(
+        '[user] SETTLEMENT_CONTRACT_ADDRESS unset — using nonce 0 (settlement will revert if on-chain nonce differs)'
+      )
+    }
   }
 
   const intentData = {
@@ -180,6 +193,8 @@ async function main() {
   await node.start()
   console.log(`[user] p2p node started: ${node.peerId}`)
 
+  attachMeshMonitor(node, [])
+
   // Explicit dial: bootstrap discovery alone can be slow; solver must be listening.
   for (const addr of bootstrapList) {
     try {
@@ -222,8 +237,10 @@ async function main() {
   await waitForTopicSubscribers(node.services.pubsub, topic)
   await waitForGossipsubMesh(node.services.pubsub, topic)
 
+  logMeshMetrics(node, [topic])
+
   console.log(`[user] publishing intent (mesh path, floodPublish off)…`)
-  await node.services.pubsub.publish(topic, wireBytes)
+  await publishWithFallback(node.services.pubsub, topic, wireBytes)
 
   console.log(`[user] intent broadcast — check solver terminal for auction / RFQ`)
   await new Promise(r => setTimeout(r, 30_000))

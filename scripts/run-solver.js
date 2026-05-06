@@ -10,6 +10,7 @@ import { initCodec } from '../sdk/intent-codec.js'
 import { createRatedJsonRpcProvider } from '../node/rpc-provider.js'
 import { SolverRegistryABI } from '../ABI/SolverRegistryABI.js'
 import { serializeSettlementSnapshot } from '../node/settlement-snapshot.js'
+import { attachMeshMonitor, logMeshMetrics } from '../node/mesh-monitor.js'
 
 const {
   PRIVATE_KEY,
@@ -74,7 +75,7 @@ async function main() {
     console.warn('[solver] registry contract unset (REGISTRY_CONTRACT_ADDRESS / SOLVER_REGISTRY_ADDRESS) — tier validation skipped')
   }
 
-  const computeSolution = createComputeEngine(wallet, poolCache)
+  const computeSolution = createComputeEngine(wallet, poolCache, provider)
 
   const bootstrapList = BOOTSTRAP_PEERS
     ? BOOTSTRAP_PEERS.split(',').map(s => s.trim()).filter(Boolean)
@@ -135,11 +136,15 @@ async function main() {
     },
   })
 
+  attachMeshMonitor(node, [])
+
   console.log(`\n[solver] ready — ws port ${SOLVER_PORT}`)
   console.log(`[solver] PeerID: ${node.peerId}`)
   console.log('[solver] dial for users BOOTSTRAP_PEERS:')
   node.getMultiaddrs().forEach(a => console.log(`  ${a}`))
   console.log('\n[solver] waiting for intents…\n')
+
+  setInterval(() => logMeshMetrics(node, []), 60_000).unref?.()
 
   process.on('SIGINT', async () => {
     console.log('\n[solver] shutting down…')

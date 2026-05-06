@@ -87,6 +87,59 @@ export function decodePath(path) {
 }
 
 /**
+ * Validate that a packed v3 path is well-formed and its token endpoints match
+ * intent.inputToken / intent.outputToken. Throws with a descriptive message on failure.
+ *
+ * Valid path lengths: 43 bytes (1-hop) or multiples of +23 after the first 43.
+ * Each hop: tokenA(20) + fee(3) + tokenB(20) — but consecutive hops share the
+ * connecting token, so: 20 + 3 + (23 * (n-1)) + 20 = 43 + 23*(n-1) total.
+ *
+ * @param {Uint8Array|string} route  packed v3 path bytes
+ * @param {string} inputToken        intent.inputToken
+ * @param {string} outputToken       intent.outputToken
+ */
+export function validatePathEndpoints(route, inputToken, outputToken) {
+  const path = typeof route === 'string'
+    ? ethers.getBytes(route)
+    : route
+
+  if (path.length < 43 || (path.length - 43) % 23 !== 0) {
+    throw new Error(
+      `Route path length ${path.length} is not a valid v3 packed path (must be 43 + 23*n bytes)`
+    )
+  }
+
+  const firstToken = ethers.getAddress(ethers.hexlify(path.slice(0, 20)))
+  const lastToken  = ethers.getAddress(ethers.hexlify(path.slice(path.length - 20)))
+  const feeStart   = path.length - 20 - 23 + 20 // fee bytes start within last hop
+
+  // Validate all fee tiers in the path
+  const validFees = new Set(Object.values(FEE_TIERS))
+  let offset = 0
+  while (offset + 23 <= path.length - 20) {
+    const fee = (path[offset+20] << 16) | (path[offset+21] << 8) | path[offset+22]
+    if (!validFees.has(fee)) {
+      throw new Error(`Route contains invalid fee tier ${fee} at offset ${offset+20}`)
+    }
+    offset += 23
+  }
+
+  const expectedIn  = ethers.getAddress(inputToken)
+  const expectedOut = ethers.getAddress(outputToken)
+
+  if (firstToken !== expectedIn) {
+    throw new Error(
+      `Route first token ${firstToken} does not match intent.inputToken ${expectedIn}`
+    )
+  }
+  if (lastToken !== expectedOut) {
+    throw new Error(
+      `Route last token ${lastToken} does not match intent.outputToken ${expectedOut}`
+    )
+  }
+}
+
+/**
  * Pick the best fee tier for a given pool's liquidity depth.
  * In production this would read pool.liquidity from the state cache.
  * v1: use a simple heuristic — known stable pairs get LOW, everything else MEDIUM.

@@ -224,14 +224,14 @@ export async function assertSettlementPreflight({
     )
 
   const nonceOnChain = await withRpcRetries(() =>
-    registry.nonces(ethers.getAddress(intent.user))
+    settlement.nonces(ethers.getAddress(intent.user))
   )
   const intentNonce = u256(intent.nonce)
   if (nonceOnChain !== intentNonce)
     throw new SettlementPreflightError(
       'L114',
-      `Nonce mismatch (registry: ${nonceOnChain}, intent: ${intentNonce})`,
-      'Re-sign intent after reading SolverRegistry.nonces(user) — nonce lives on registry, not on settlement.'
+      `Nonce mismatch (settlement: ${nonceOnChain}, intent: ${intentNonce})`,
+      'Re-sign intent after reading IntentSettlement.nonces(user).'
     )
 
   try {
@@ -321,6 +321,29 @@ export async function assertSettlementPreflight({
         `Insufficient allowance to settlement (${allowance} < ${needAmt})`,
         `Approve IntentSettlement (${settlementAddress}) for token ${inTok.slice(0, 10)}… — this tx is distinct from settle.`
       )
+  }
+
+  if (process.env.SETTLE_QUOTER_CHECK === '1') {
+    const { quoteExactInput } = await import('./compute-engine.js')
+    const bidRouteBytes = bidTuple[3]
+    const t0 = Date.now()
+    const quoted = await quoteExactInput(provider, bidRouteBytes, u256(intent.inputAmount))
+    const ms = Date.now() - t0
+    if (quoted === null) {
+      throw new SettlementPreflightError(
+        'quoter.revert',
+        'QuoterV2.quoteExactInput reverted — swap would likely fail at the router',
+        'Check route validity, pool liquidity, and inputAmount. Set SETTLE_QUOTER_CHECK=0 to skip.'
+      )
+    }
+    const bidOut = u256(bid.outputAmount)
+    if (quoted < bidOut) {
+      console.warn(
+        `[preflight] quoter ${quoted} < bid.outputAmount ${bidOut} — solver may be overpromising (${ms}ms)`
+      )
+    } else {
+      console.log(`[preflight] quoter check passed: ${quoted} ≥ ${bidOut} (${ms}ms)`)
+    }
   }
 
   return { settleArgs, intentIdComputed, registryAddr }
