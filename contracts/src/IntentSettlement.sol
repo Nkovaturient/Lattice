@@ -3,12 +3,17 @@ pragma solidity 0.8.34;
 
 import "./IntentTypes.sol";
 import "./SolverRegistry.sol";
+import "./UniswapV3Route.sol";
+import "./IntentSettlementErrors.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-// Minimal interface — only what we call on the SwapRouter
+// Minimal interface — Uniswap V3 SwapRouter **v1** `exactInput` (includes `deadline` in params).
 interface ISwapRouter {
     struct ExactInputParams {
         bytes path;
@@ -26,7 +31,7 @@ interface ISwapRouter {
 // encoded route, checks output >= minOutputAmount, pays the solver fee,
 // and protects against replay via per-user nonces.
 
-contract IntentSettlement is ReentrancyGuard {
+contract IntentSettlement is ReentrancyGuard, Ownable2Step, Pausable {
     using IntentTypes for IntentTypes.Intent;
     using IntentTypes for IntentTypes.Bid;
     using SafeERC20 for IERC20;
@@ -41,9 +46,21 @@ contract IntentSettlement is ReentrancyGuard {
     uint256 public constant SOLVER_FEE_BPS = 500; // 5% of surplus
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
-    // Uniswap v3 SwapRouter (same address Arbitrum mainnet + Sepolia)
+    /// @dev Min bid-vs-recorded shortfall (bps of `bid.outputAmount`) to allow slash — blocks dust griefing.
+    uint256 public constant MIN_OVERPROMISE_BPS = 10; // 0.1% (~1e15 wei on 1 WETH-scale output)
+
+    /// @notice Uniswap V3 **SwapRouter (v1)** — `exactInput` with `deadline` in `ExactInputParams`.
+    /// @dev Immutable by design: router upgrades (SwapRouter02, V4, etc.) require redeploying this contract.
+    ///      We stay on v1 (not SwapRouter02 `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45`) because v2's
+    ///      `exactInput` drops the deadline field — bids carry `bid.deadline` and v1 matches that API.
+    ///      v1 remains live on Arbitrum One / Sepolia at this address; v2 is preferred for greenfield apps.
     address public constant SWAP_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+
+    /// @notice Uniswap V3 QuoterV2 — for off-chain route quoting only; not called in `settle`.
     address public constant QUOTER_V2 = 0x61fFE014bA17989E743c5F6cB21bF9697530B21e;
+
+    /// @dev Documented reference only — not used on-chain in v1.
+    address public constant SWAP_ROUTER02 = 0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45;
 
     // ── State ─────────────────────────────────────────────────────────────────
 
@@ -55,16 +72,14 @@ contract IntentSettlement is ReentrancyGuard {
     /// @dev Actual output token amount from the swap, recorded for on-chain overpromise checks.
     mapping(bytes32 => uint256) public settlementActualOutput;
 
-    // ── Custom errors ─────────────────────────────────────────────────────────
+    /// @dev One overpromise slash per intent — prevents replay griefing the same bid+sig.
+    mapping(bytes32 => bool) public slashedForOverpromise;
 
-    /// Route bytes are not a valid packed Uniswap v3 path (must be 43 + 23*n bytes).
-    error InvalidRouteLength(uint256 length);
+    /// @dev When `settlementActualOutput` was recorded (unix seconds); used for slash-window pruning.
+    mapping(bytes32 => uint64) public settlementRecordedAt;
 
-    /// Route first token does not match intent.inputToken.
-    error RouteInputTokenMismatch(address routeStart, address expected);
-
-    /// Route last token does not match intent.outputToken.
-    error RouteOutputTokenMismatch(address routeEnd, address expected);
+    /// @dev After this period, `pruneSettlementRecord` may delete output metadata if unslashed.
+    uint64 public constant SLASH_WINDOW = 7 days;
 
     // ── Events ────────────────────────────────────────────────────────────────
 
@@ -79,9 +94,11 @@ contract IntentSettlement is ReentrancyGuard {
 
     event IntentExpired(bytes32 indexed intentId);
 
+    event SettlementRecordPruned(bytes32 intentId);
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
-    constructor(address _registry) {
+    constructor(address _registry) Ownable(msg.sender) {
         registry = SolverRegistry(_registry);
 
         // Compute EIP-712 domain separator — mirrors domain.js DOMAIN
@@ -96,6 +113,17 @@ contract IntentSettlement is ReentrancyGuard {
         );
     }
 
+    // ── Emergency pause ───────────────────────────────────────────────────────
+
+    /// @notice Halt new settlements while investigating an incident. `slashForOverpromise` stays live.
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
     // ── Settlement ────────────────────────────────────────────────────────────
 
     /**
@@ -108,37 +136,55 @@ contract IntentSettlement is ReentrancyGuard {
         bytes calldata intentSig,
         IntentTypes.Bid calldata bid,
         bytes calldata bidSig
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         bytes32 intentId = _domainHash(intent.hashIntent());
-        require(!settled[intentId], "Intent already settled");
+        if (settled[intentId]) revert IntentSettlementErrors.IntentAlreadySettled(intentId);
 
-        require(block.timestamp <= intent.deadline, "Intent expired");
-        require(block.timestamp <= bid.deadline, "Bid expired");
-        require(bid.deadline <= intent.deadline, "Bid extends past intent");
+        if (block.timestamp > intent.deadline) {
+            revert IntentSettlementErrors.IntentPastDeadline(intent.deadline, block.timestamp);
+        }
+        if (block.timestamp > bid.deadline) {
+            revert IntentSettlementErrors.BidExpired(bid.deadline, block.timestamp);
+        }
+        if (bid.deadline > intent.deadline) {
+            revert IntentSettlementErrors.BidExceedsIntentDeadline(bid.deadline, intent.deadline);
+        }
 
-        require(intent.inputToken != address(0) && intent.outputToken != address(0), "ERC20 only");
+        _requireIntentWellFormed(intent);
 
-        require(registry.isActiveAndStaked(msg.sender), "Solver not registered");
+        if (!registry.isActiveAndStaked(msg.sender)) {
+            revert IntentSettlementErrors.SolverNotRegistered(msg.sender);
+        }
 
-        require(_verifySignature(intentId, intentSig, intent.user), "Invalid intent signature");
+        _requireIntentSignature(intentId, intentSig, intent.user);
 
-        require(registry.nonces(intent.user) == intent.nonce, "Nonce mismatch");
+        uint256 onChainNonce = registry.nonces(intent.user);
+        if (onChainNonce != intent.nonce) {
+            revert IntentSettlementErrors.NonceMismatch(onChainNonce, intent.nonce);
+        }
 
         bytes32 bidHash = _domainHash(bid.hashBid());
-        require(_verifySignature(bidHash, bidSig, msg.sender), "Invalid bid signature");
+        _requireBidSignature(bidHash, bidSig, msg.sender);
 
-        require(bid.intentId == intentId, "Bid intentId mismatch");
-        require(bid.solver == msg.sender, "Bid solver mismatch");
-        require(bid.outputAmount >= intent.minOutputAmount, "Bid below floor");
+        if (bid.intentId != intentId) {
+            revert IntentSettlementErrors.BidIntentIdMismatch(bid.intentId, intentId);
+        }
+        if (bid.solver != msg.sender) {
+            revert IntentSettlementErrors.BidSolverMismatch(bid.solver, msg.sender);
+        }
+        if (bid.outputAmount < intent.minOutputAmount) {
+            revert IntentSettlementErrors.BidBelowFloor(bid.outputAmount, intent.minOutputAmount);
+        }
 
-        // Signed intent fields: enforce preferred solver and topic tier
-        require(
-            intent.preferredSolver == address(0) || intent.preferredSolver == msg.sender,
-            "Not preferred solver"
-        );
-        require(registry.solverTier(msg.sender) >= intent.topicTier, "Tier mismatch");
+        if (intent.preferredSolver != address(0) && intent.preferredSolver != msg.sender) {
+            revert IntentSettlementErrors.NotPreferredSolver(intent.preferredSolver, msg.sender);
+        }
+        uint8 tier = registry.solverTier(msg.sender);
+        if (tier < intent.topicTier) {
+            revert IntentSettlementErrors.SolverTierInsufficient(tier, intent.topicTier);
+        }
 
-        _validateRoute(bid.route, intent.inputToken, intent.outputToken);
+        UniswapV3Route.validate(bid.route, intent.inputToken, intent.outputToken);
 
         // Effects before any external call (CEI) — blocks reentrant double-settlement
         settled[intentId] = true;
@@ -158,12 +204,15 @@ contract IntentSettlement is ReentrancyGuard {
             })
         );
 
-        require(actualOutput >= intent.minOutputAmount, "Output below minimum");
+        if (actualOutput < intent.minOutputAmount) {
+            revert IntentSettlementErrors.OutputBelowMinimum(actualOutput, intent.minOutputAmount);
+        }
 
         (uint256 userGets, uint256 solverFee) = _feeSplit(actualOutput, intent.minOutputAmount);
 
         // Record before outbound transfers (CEI) — binds slashForOverpromise to on-chain truth
         settlementActualOutput[intentId] = actualOutput;
+        settlementRecordedAt[intentId] = uint64(block.timestamp);
         registry.recordFill(msg.sender);
 
         _payOutputsAndCleanup(
@@ -177,6 +226,25 @@ contract IntentSettlement is ReentrancyGuard {
             intent.inputAmount,
             actualOutput
         );
+    }
+
+    /**
+     * @notice Tombstone an intent after its deadline and emit `IntentExpired`.
+     * @dev Anyone may call with a valid user signature. Does not increment nonce.
+     *      Further `settle` attempts revert `IntentAlreadySettled`.
+     */
+    function markExpired(IntentTypes.Intent calldata intent, bytes calldata intentSig) external {
+        bytes32 intentId = _domainHash(intent.hashIntent());
+        if (settled[intentId]) revert IntentSettlementErrors.IntentAlreadySettled(intentId);
+        if (block.timestamp <= intent.deadline) {
+            revert IntentSettlementErrors.IntentDeadlineNotPassed(intent.deadline, block.timestamp);
+        }
+
+        _requireIntentWellFormed(intent);
+        _requireIntentSignature(intentId, intentSig, intent.user);
+
+        settled[intentId] = true;
+        emit IntentExpired(intentId);
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -197,22 +265,65 @@ contract IntentSettlement is ReentrancyGuard {
     /**
      * Slash a solver who bid outputAmount above what settlement produced.
      * Uses the output amount recorded at settlement time — callers cannot inject a fake actualOutput.
+     * Shortfall must be at least `MIN_OVERPROMISE_BPS` of the bid (output-token units) to block dust griefing.
      * Uses `slashOverpromise` so deregistered solvers (e.g. after an earlier auto-slash) still get
      * `slashes` / events when no stake remains to take.
      */
     function slashForOverpromise(IntentTypes.Bid calldata bid, bytes calldata bidSig) external {
         bytes32 bidHash = _domainHash(bid.hashBid());
-        require(_verifySignature(bidHash, bidSig, bid.solver), "Invalid bid signature");
+        _requireBidSignature(bidHash, bidSig, bid.solver);
 
         bytes32 intentId = bid.intentId;
-        require(settled[intentId], "Intent not settled");
+        if (!settled[intentId]) revert IntentSettlementErrors.IntentNotSettled(intentId);
+        if (slashedForOverpromise[intentId]) {
+            revert IntentSettlementErrors.AlreadySlashedForOverpromise(intentId);
+        }
         uint256 recorded = settlementActualOutput[intentId];
-        require(recorded < bid.outputAmount, "No overpromise to slash");
+        if (recorded >= bid.outputAmount) {
+            revert IntentSettlementErrors.NoOverpromiseToSlash(recorded, bid.outputAmount);
+        }
+        uint256 shortfall = bid.outputAmount - recorded;
+        uint256 minShortfall = (bid.outputAmount * MIN_OVERPROMISE_BPS) / BPS_DENOMINATOR;
+        if (shortfall < minShortfall) {
+            revert IntentSettlementErrors.OverpromiseTooSmall(shortfall, minShortfall);
+        }
 
+        slashedForOverpromise[intentId] = true;
         registry.slashOverpromise(bid.solver);
+        delete settlementActualOutput[intentId];
+        delete settlementRecordedAt[intentId];
+    }
+
+    /**
+     * @notice Reclaim storage after the slash window when no overpromise slash occurred.
+     * @dev Permissionless. Cannot prune while slash dispute data may still be needed.
+     */
+    function pruneSettlementRecord(bytes32 intentId) external {
+        if (!settled[intentId]) revert IntentSettlementErrors.IntentNotSettled(intentId);
+        if (slashedForOverpromise[intentId]) revert IntentSettlementErrors.AlreadySlashed(intentId);
+        uint64 recordedAt = settlementRecordedAt[intentId];
+        if (recordedAt == 0) revert IntentSettlementErrors.NoSettlementRecord(intentId);
+        uint64 pruneAfter = recordedAt + SLASH_WINDOW;
+        if (block.timestamp < pruneAfter) {
+            revert IntentSettlementErrors.SlashWindowOpen(pruneAfter, block.timestamp);
+        }
+
+        delete settlementActualOutput[intentId];
+        delete settlementRecordedAt[intentId];
+        emit SettlementRecordPruned(intentId);
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
+
+    function _requireIntentWellFormed(IntentTypes.Intent calldata intent) private pure {
+        if (intent.user == address(0)) revert IntentSettlementErrors.ZeroUser();
+        if (intent.inputToken == address(0) || intent.outputToken == address(0)) {
+            revert IntentSettlementErrors.ERC20TokensOnly();
+        }
+        if (intent.recipient == address(0)) revert IntentSettlementErrors.ZeroRecipient();
+        if (intent.inputAmount == 0) revert IntentSettlementErrors.ZeroInputAmount();
+        if (intent.minOutputAmount == 0) revert IntentSettlementErrors.ZeroMinOutput();
+    }
 
     function _feeSplit(uint256 actualOutput, uint256 minOutputAmount)
         private
@@ -241,37 +352,27 @@ contract IntentSettlement is ReentrancyGuard {
         emit IntentSettled(intentId, user, msg.sender, inputAmount, actualOutput, solverFee);
     }
 
-    /**
-     * Validate packed Uniswap v3 path well-formedness and token endpoint alignment.
-     * Each hop: tokenA(20) + fee(3) + tokenB(20); consecutive hops share the bridge token.
-     * Valid lengths: 43 (1-hop) or 43 + 23*n (n additional hops).
-     * Reverts with custom errors so callers can diagnose route vs signature issues distinctly.
-     */
-    function _validateRoute(bytes calldata route, address inputToken, address outputToken) internal pure {
-        uint256 len = route.length;
-        if (len < 43 || (len - 43) % 23 != 0) revert InvalidRouteLength(len);
-
-        address routeStart;
-        address routeEnd;
-        assembly {
-            // first 20 bytes = tokenIn
-            routeStart := shr(96, calldataload(route.offset))
-            // last 20 bytes = tokenOut (starts at offset + len - 20)
-            routeEnd   := shr(96, calldataload(add(route.offset, sub(len, 20))))
-        }
-
-        if (routeStart != inputToken)  revert RouteInputTokenMismatch(routeStart, inputToken);
-        if (routeEnd   != outputToken) revert RouteOutputTokenMismatch(routeEnd, outputToken);
-    }
-
     function _domainHash(bytes32 structHash) internal view returns (bytes32) {
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
     }
 
-    /// @dev Uses OZ ECDSA: rejects EIP-2 malleable signatures (high `s`, invalid `v`) and never treats
-    ///      `ecrecover` failure as matching `expected` (including `expected == address(0)`).
-    function _verifySignature(bytes32 hash, bytes calldata sig, address expected) internal pure returns (bool) {
-        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(hash, bytes(sig));
-        return err == ECDSA.RecoverError.NoError && recovered == expected;
+    function _recoverSigner(bytes32 digest, bytes calldata sig) private pure returns (address recovered) {
+        ECDSA.RecoverError err;
+        (recovered, err,) = ECDSA.tryRecover(digest, sig);
+        if (err != ECDSA.RecoverError.NoError) return address(0);
+    }
+
+    function _requireIntentSignature(bytes32 digest, bytes calldata sig, address expected) private pure {
+        address recovered = _recoverSigner(digest, sig);
+        if (recovered != expected) {
+            revert IntentSettlementErrors.InvalidIntentSignature(recovered, expected);
+        }
+    }
+
+    function _requireBidSignature(bytes32 digest, bytes calldata sig, address expected) private pure {
+        address recovered = _recoverSigner(digest, sig);
+        if (recovered != expected) {
+            revert IntentSettlementErrors.InvalidBidSignature(recovered, expected);
+        }
     }
 }

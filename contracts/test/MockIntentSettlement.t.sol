@@ -4,6 +4,8 @@ pragma solidity 0.8.34;
 import "forge-std/Test.sol";
 import "../src/SolverRegistry.sol";
 import "../src/MockIntentSettlement.sol";
+import "../src/IntentSettlementErrors.sol";
+import "../src/UniswapV3Route.sol";
 
 contract MockERC20M {
     mapping(address => uint256) public balanceOf;
@@ -113,7 +115,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.NonceMismatch.selector, 0, 999));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.NonceMismatch.selector, 0, 999));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -132,7 +134,7 @@ contract MockIntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.IntentAlreadySettled.selector, _intentId(intent)));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.IntentAlreadySettled.selector, _intentId(intent)));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -150,7 +152,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.IntentExpired.selector, intent.deadline, block.timestamp));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.IntentPastDeadline.selector, intent.deadline, block.timestamp));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -163,7 +165,19 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.BidExceedsIntentDeadline.selector, bid.deadline, intent.deadline));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.BidExceedsIntentDeadline.selector, bid.deadline, intent.deadline));
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_RevertZeroUser() public {
+        MockIntentSettlement.Intent memory intent = _makeIntent();
+        intent.user = address(0);
+        bytes memory iSig = abi.encodePacked(bytes32(0), bytes32(0), uint8(27));
+        MockIntentSettlement.Bid memory bid = _makeBid(intent);
+        bytes memory bSig = _signBid(bid);
+
+        vm.expectRevert(IntentSettlementErrors.ZeroUser.selector);
+        vm.prank(solver);
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -180,7 +194,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.RouteInvalidLength.selector, bid.route.length));
+        vm.expectRevert(abi.encodeWithSelector(UniswapV3Route.InvalidRouteLength.selector, bid.route.length));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -196,7 +210,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.RouteInputTokenMismatch.selector, wrongToken, intent.inputToken));
+        vm.expectRevert(abi.encodeWithSelector(UniswapV3Route.RouteInputTokenMismatch.selector, wrongToken, intent.inputToken));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -212,7 +226,37 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.RouteOutputTokenMismatch.selector, wrongToken, intent.outputToken));
+        vm.expectRevert(abi.encodeWithSelector(UniswapV3Route.RouteOutputTokenMismatch.selector, wrongToken, intent.outputToken));
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_RevertRouteZeroHopToken() public {
+        MockIntentSettlement.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent);
+        MockIntentSettlement.Bid memory bid = _makeBid(intent);
+        bid.route = abi.encodePacked(intent.inputToken, uint24(3000), address(0), uint24(3000), intent.outputToken);
+        bytes memory bSig = _signBid(bid);
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(UniswapV3Route.RouteZeroHopToken.selector, uint256(23)));
+        settlement.settle(intent, iSig, bid, bSig);
+    }
+
+    function test_RevertInvalidRouteFee() public {
+        MockIntentSettlement.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent);
+        MockIntentSettlement.Bid memory bid = _makeBid(intent);
+        bid.route = abi.encodePacked(intent.inputToken, uint24(2500), intent.outputToken);
+        bytes memory bSig = _signBid(bid);
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(UniswapV3Route.InvalidRouteFee.selector, uint24(2500)));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -225,7 +269,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(makeAddr("rando"));
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.SolverNotRegistered.selector, makeAddr("rando")));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.SolverNotRegistered.selector, makeAddr("rando")));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -241,7 +285,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.SolverTierInsufficient.selector, 0, 1));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.SolverTierInsufficient.selector, 0, 1));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -256,7 +300,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.BidBelowFloor.selector, bid.outputAmount, intent.minOutputAmount));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.BidBelowFloor.selector, bid.outputAmount, intent.minOutputAmount));
         settlement.settle(intent, iSig, bid, bSig);
     }
 
@@ -273,7 +317,7 @@ contract MockIntentSettlementTest is Test {
         bytes memory bSig = _signBid(bid);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.NotPreferredSolver.selector, other, solver));
+        vm.expectRevert(abi.encodeWithSelector(IntentSettlementErrors.NotPreferredSolver.selector, other, solver));
         settlement.settle(intent, iSig, bid, bSig);
     }
 

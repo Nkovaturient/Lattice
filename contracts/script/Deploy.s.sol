@@ -2,21 +2,14 @@
 pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
-import {SolverRegistry} from "../src/SolverRegistry.sol";
-import {IntentSettlement} from "../src/IntentSettlement.sol";
+import {LatticeDeployLib} from "./LatticeDeployLib.sol";
 import {MockIntentSettlement} from "../src/MockIntentSettlement.sol";
 
+/// @title DeployAll
+/// @notice Production pair deploy for `SolverRegistry` + `IntentSettlement`.
+/// @dev See `LatticeDeployLib` — do not deploy either contract in isolation with a
+///      placeholder settlement address. Use this script (or the lib in tests) only.
 contract DeployAll is Script {
-    SolverRegistry public registry;
-    IntentSettlement public settlement;
-
-    /**
-     * @notice Deploy `MockIntentSettlement` bound to an existing `SolverRegistry`.
-     * @dev The registry is only used for `isActiveAndStaked` / `solverTier`. User intent
-     *      nonces live on the mock contract (see `MockIntentSettlement.sol`).
-     *      Update app `.env` `SETTLEMENT_CONTRACT_ADDRESS` to the printed mock address and
-     *      align EIP-712 `verifyingContract` / `INTENT_SETTLEMENT_ADDRESS` with that address.
-     */
     function deployMock(address registryAddress) external {
         vm.startBroadcast();
         MockIntentSettlement mock = new MockIntentSettlement(registryAddress);
@@ -27,16 +20,13 @@ contract DeployAll is Script {
     function run() external {
         vm.startBroadcast();
 
-        address deployer = msg.sender;
-        uint64 nonce = vm.getNonce(deployer);
-        address predictedSettlement = vm.computeCreateAddress(deployer, uint256(nonce) + 1);
+        LatticeDeployLib.Pair memory pair =
+            LatticeDeployLib.deployPair(vm, msg.sender, msg.sender);
 
-        registry = new SolverRegistry(predictedSettlement, deployer);
-        console.log("SolverRegistry deployed at:", address(registry));
-
-        settlement = new IntentSettlement(address(registry));
-        console.log("IntentSettlement deployed at:", address(settlement));
-        require(address(settlement) == predictedSettlement, "settlement address mismatch");
+        console.log("SolverRegistry deployed at:", address(pair.registry));
+        console.log("IntentSettlement deployed at:", address(pair.settlement));
+        console.log("Cross-check settlementContract:", pair.registry.settlementContract());
+        console.log("Cross-check registry immutables:", address(pair.settlement.registry()));
 
         vm.stopBroadcast();
     }

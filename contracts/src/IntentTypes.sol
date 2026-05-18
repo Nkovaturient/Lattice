@@ -27,7 +27,11 @@ library IntentTypes {
         uint256 inputAmount;        // exact amount in — no partial fills
         uint256 minOutputAmount;    // slippage floor
         address recipient;
+        /// @dev EIP-712 `uint64`: `abi.encode` / `encodeData` right-pads to 32 bytes (not 8).
+        /// Off-chain signers must use TypedDataEncoder or AbiCoder with type `uint64` — never
+        /// `hexZeroPad(deadline, 8)` or other 8-byte manual packing (breaks signatures).
         uint64  deadline;           // unix timestamp — hard on-chain expiry
+        /// @dev EIP-712 `uint8`: padded to 32 bytes in `hashIntent` the same way as `deadline`.
         uint8   topicTier;          // 0 = public, 1 = tier-1
         address preferredSolver;    // address(0) = open auction
     }
@@ -37,6 +41,7 @@ library IntentTypes {
         address solver;
         uint256 outputAmount;       // guaranteed output amount
         bytes   route;              // ABI-encoded Uniswap v3 path
+        /// @dev Same 32-byte `abi.encode` padding as `Intent.deadline` — see `sdk/domain.js`.
         uint64  deadline;           // must be <= Intent.deadline (enforced in IntentSettlement)
     }
 

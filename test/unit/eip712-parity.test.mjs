@@ -123,6 +123,21 @@ async function run() {
     preferredSolver: ethers.ZeroAddress,
   }
 
+  // Golden intent — fixed fields; must match contracts/test/Eip712Golden.t.sol
+  const GOLDEN_INTENT = {
+    user:            '0x0000000000000000000000000000000000000001',
+    nonce:           '0',
+    inputToken:      USDC,
+    outputToken:     WETH,
+    inputAmount:     '1000000000',
+    minOutputAmount: '400000000000000000',
+    recipient:       '0x0000000000000000000000000000000000000001',
+    deadline:        1735689600,
+    topicTier:       0,
+    preferredSolver: ethers.ZeroAddress,
+  }
+  const GOLDEN_STRUCT_HASH = '0xe4dd258865d80d5b9e88f20fae1cd70d464c7d8d606ef0dedbb6babb7282be9a'
+
   // ── 1. JS intentId matches ethers.TypedDataEncoder ────────────────────────
   console.log('\nIntentId consistency:')
   {
@@ -135,6 +150,40 @@ async function run() {
 
     ok(`struct hash computed: ${manualHash.slice(0,18)}…`)
     ok(`intentId (with domain): ${fromEncoder.slice(0,18)}…`)
+  }
+
+  // ── 1b. uint64 deadline must be 32-byte padded (not 8-byte manual) ────────
+  console.log('\nuint64 encodeData padding:')
+  {
+    const correct = solidityHashIntent(GOLDEN_INTENT)
+    eq(correct, GOLDEN_STRUCT_HASH, 'Golden struct hash (uint64 padded via AbiCoder)')
+
+    const wrongPacked = ethers.keccak256(
+      ethers.concat([
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ['bytes32', 'address', 'uint256', 'address', 'address', 'uint256', 'uint256', 'address'],
+          [
+            ethers.keccak256(ethers.toUtf8Bytes(
+              'Intent(address user,uint256 nonce,address inputToken,address outputToken,uint256 inputAmount,uint256 minOutputAmount,address recipient,uint64 deadline,uint8 topicTier,address preferredSolver)'
+            )),
+            GOLDEN_INTENT.user,
+            GOLDEN_INTENT.nonce,
+            GOLDEN_INTENT.inputToken,
+            GOLDEN_INTENT.outputToken,
+            GOLDEN_INTENT.inputAmount,
+            GOLDEN_INTENT.minOutputAmount,
+            GOLDEN_INTENT.recipient,
+          ]
+        ),
+        ethers.zeroPadValue(ethers.toBeHex(GOLDEN_INTENT.deadline), 8),
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ['uint8', 'address'],
+          [GOLDEN_INTENT.topicTier, GOLDEN_INTENT.preferredSolver]
+        ),
+      ])
+    )
+    if (wrongPacked === correct) bad('8-byte deadline packing must not match Solidity abi.encode')
+    else ok('8-byte deadline packing diverges from on-chain hash (as expected)')
   }
 
   // ── 2. Full domain hash parity ────────────────────────────────────────────

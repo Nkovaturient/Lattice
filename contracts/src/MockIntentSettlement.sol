@@ -38,7 +38,12 @@ import {ECDSA}    from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712}   from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {IERC20}   from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./UniswapV3Route.sol";
+import "./IntentSettlementErrors.sol";
 
 // ── Minimal interface to SolverRegistry ──────────────────────────────────────
 // Mirrors the functions actually called by this contract; keeps the import
@@ -50,7 +55,7 @@ interface ISolverRegistry {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-contract MockIntentSettlement is EIP712, ReentrancyGuard {
+contract MockIntentSettlement is EIP712, ReentrancyGuard, Ownable2Step, Pausable {
     using SafeERC20 for IERC20;
     using ECDSA     for bytes32;
 
@@ -128,6 +133,8 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
         uint256 nonce
     );
 
+    event IntentExpired(bytes32 indexed intentId);
+
     // Emitted instead of calling SwapRouter — makes the mock observable
     event MockExecutionSkipped(
         bytes32 indexed intentId,
@@ -137,35 +144,41 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
         bytes   route         // retained for off-chain route verification
     );
 
-    // ── Errors ────────────────────────────────────────────────────────────────
-    // Named errors cost less gas than require strings and are decode-able
-    // by ethers parseError — important for the settlement-revert.js decoder.
-
-    error IntentAlreadySettled(bytes32 intentId);
-    error IntentExpired(uint64 deadline, uint256 blockTimestamp);
-    error BidExpired(uint64 bidDeadline, uint256 blockTimestamp);
-    error BidExceedsIntentDeadline(uint64 bidDeadline, uint64 intentDeadline);
-    error ERC20TokensOnly();
-    error SolverNotRegistered(address solver);
-    error InvalidIntentSignature(address recovered, address expected);
-    error NonceMismatch(uint256 onChain, uint256 inIntent);
-    error InvalidBidSignature(address recovered, address expected);
-    error BidIntentIdMismatch(bytes32 bidIntentId, bytes32 computedIntentId);
-    error BidSolverMismatch(address bidSolver, address msgSender);
-    error BidBelowFloor(uint256 bidOutput, uint256 minOutput);
-    error NotPreferredSolver(address preferredSolver, address actualSolver);
-    error SolverTierInsufficient(uint8 solverTier, uint8 requiredTier);
-    error RouteInvalidLength(uint256 length);
-    error RouteInputTokenMismatch(address routeStart, address expected);
-    error RouteOutputTokenMismatch(address routeEnd, address expected);
-
     // ── Constructor ───────────────────────────────────────────────────────────
 
     constructor(address _registry)
-        EIP712("IntentDeFi", "1")  // must match DOMAIN in sdk/domain.js
+        EIP712("IntentDeFi", "1") // must match DOMAIN in sdk/domain.js
+        Ownable(msg.sender)
     {
         require(_registry != address(0), "MockIntentSettlement: zero registry");
         registry = ISolverRegistry(_registry);
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    /// @notice Tombstone an expired intent for indexers; does not increment nonce.
+    function markExpired(Intent calldata intent, bytes calldata intentSig) external {
+        bytes32 intentId = _hashIntent(intent);
+        if (settled[intentId]) revert IntentSettlementErrors.IntentAlreadySettled(intentId);
+        if (block.timestamp <= intent.deadline) {
+            revert IntentSettlementErrors.IntentDeadlineNotPassed(intent.deadline, block.timestamp);
+        }
+
+        _requireIntentWellFormed(intent);
+
+        address recovered = _recoverIntentSigner(intent, intentSig);
+        if (recovered != intent.user) {
+            revert IntentSettlementErrors.InvalidIntentSignature(recovered, intent.user);
+        }
+
+        settled[intentId] = true;
+        emit IntentExpired(intentId);
     }
 
     // ── Core settle function ──────────────────────────────────────────────────
@@ -191,56 +204,40 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
     )
         external
         nonReentrant
+        whenNotPaused
     {
         // ── L103: replay guard ────────────────────────────────────────────────
         bytes32 intentId = _hashIntent(intent);
         if (settled[intentId])
-            revert IntentAlreadySettled(intentId);
+            revert IntentSettlementErrors.IntentAlreadySettled(intentId);
 
         // ── L104: intent deadline ─────────────────────────────────────────────
         // solidity's block.timestamp has ~12s granularity on L2s; fine for 10min intents.
         if (block.timestamp >= intent.deadline)
-            revert IntentExpired(intent.deadline, block.timestamp);
+            revert IntentSettlementErrors.IntentPastDeadline(intent.deadline, block.timestamp);
 
         // ── L105 + L106: bid deadline ─────────────────────────────────────────
         if (block.timestamp >= bid.deadline)
-            revert BidExpired(bid.deadline, block.timestamp);
+            revert IntentSettlementErrors.BidExpired(bid.deadline, block.timestamp);
         if (bid.deadline > intent.deadline)
-            revert BidExceedsIntentDeadline(bid.deadline, intent.deadline);
+            revert IntentSettlementErrors.BidExceedsIntentDeadline(bid.deadline, intent.deadline);
 
-        // ── L108: ERC-20 tokens only ──────────────────────────────────────────
-        if (intent.inputToken == address(0) || intent.outputToken == address(0))
-            revert ERC20TokensOnly();
+        _requireIntentWellFormed(intent);
 
         // ── L110: solver registration + stake ────────────────────────────────
         if (!registry.isActiveAndStaked(msg.sender))
-            revert SolverNotRegistered(msg.sender);
+            revert IntentSettlementErrors.SolverNotRegistered(msg.sender);
 
         // ── L112: intent EIP-712 signature ────────────────────────────────────
-        address recoveredIntent = _hashTypedDataV4(
-            keccak256(abi.encode(
-                INTENT_TYPEHASH,
-                intent.user,
-                intent.nonce,
-                intent.inputToken,
-                intent.outputToken,
-                intent.inputAmount,
-                intent.minOutputAmount,
-                intent.recipient,
-                intent.deadline,
-                intent.topicTier,
-                intent.preferredSolver
-            ))
-        ).recover(intentSig);
-
+        address recoveredIntent = _recoverIntentSigner(intent, intentSig);
         if (recoveredIntent != intent.user)
-            revert InvalidIntentSignature(recoveredIntent, intent.user);
+            revert IntentSettlementErrors.InvalidIntentSignature(recoveredIntent, intent.user);
 
         // ── L114: nonce ───────────────────────────────────────────────────────
         // Nonce lives on this contract — intent-builder.js reads settlementContract.nonces().
         uint256 currentNonce = nonces[intent.user];
         if (currentNonce != intent.nonce)
-            revert NonceMismatch(currentNonce, intent.nonce);
+            revert IntentSettlementErrors.NonceMismatch(currentNonce, intent.nonce);
 
         // ── L117: bid EIP-712 signature ───────────────────────────────────────
         // route is dynamic bytes — hashed before encoding per EIP-712 spec.
@@ -256,32 +253,32 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
         ).recover(bidSig);
 
         if (recoveredBid != msg.sender)
-            revert InvalidBidSignature(recoveredBid, msg.sender);
+            revert IntentSettlementErrors.InvalidBidSignature(recoveredBid, msg.sender);
 
         // ── L119: bid intentId matches computed digest ────────────────────────
         if (bid.intentId != intentId)
-            revert BidIntentIdMismatch(bid.intentId, intentId);
+            revert IntentSettlementErrors.BidIntentIdMismatch(bid.intentId, intentId);
 
         // ── L120: bid.solver == msg.sender ────────────────────────────────────
         if (bid.solver != msg.sender)
-            revert BidSolverMismatch(bid.solver, msg.sender);
+            revert IntentSettlementErrors.BidSolverMismatch(bid.solver, msg.sender);
 
         // ── L121: output meets floor ──────────────────────────────────────────
         if (bid.outputAmount < intent.minOutputAmount)
-            revert BidBelowFloor(bid.outputAmount, intent.minOutputAmount);
+            revert IntentSettlementErrors.BidBelowFloor(bid.outputAmount, intent.minOutputAmount);
 
         // ── L126: preferred solver ────────────────────────────────────────────
         if (intent.preferredSolver != address(0) &&
             intent.preferredSolver != msg.sender)
-            revert NotPreferredSolver(intent.preferredSolver, msg.sender);
+            revert IntentSettlementErrors.NotPreferredSolver(intent.preferredSolver, msg.sender);
 
         // ── L128: tier check ──────────────────────────────────────────────────
         uint8 solverTier = registry.solverTier(msg.sender);
         if (solverTier < intent.topicTier)
-            revert SolverTierInsufficient(solverTier, intent.topicTier);
+            revert IntentSettlementErrors.SolverTierInsufficient(solverTier, intent.topicTier);
 
         // ── Route well-formedness + token endpoint validation ─────────────────
-        _validateRoute(bid.route, intent.inputToken, intent.outputToken);
+        UniswapV3Route.validate(bid.route, intent.inputToken, intent.outputToken);
 
         // ── Mark settled + increment nonce BEFORE external calls ─────────────
         // (check-effects-interactions pattern; nonReentrant also guards this)
@@ -354,6 +351,38 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
+    function _requireIntentWellFormed(Intent calldata intent) internal pure {
+        if (intent.user == address(0)) revert IntentSettlementErrors.ZeroUser();
+        if (intent.inputToken == address(0) || intent.outputToken == address(0)) {
+            revert IntentSettlementErrors.ERC20TokensOnly();
+        }
+        if (intent.recipient == address(0)) revert IntentSettlementErrors.ZeroRecipient();
+        if (intent.inputAmount == 0) revert IntentSettlementErrors.ZeroInputAmount();
+        if (intent.minOutputAmount == 0) revert IntentSettlementErrors.ZeroMinOutput();
+    }
+
+    function _recoverIntentSigner(Intent calldata intent, bytes calldata intentSig)
+        internal
+        view
+        returns (address)
+    {
+        return _hashTypedDataV4(
+            keccak256(abi.encode(
+                INTENT_TYPEHASH,
+                intent.user,
+                intent.nonce,
+                intent.inputToken,
+                intent.outputToken,
+                intent.inputAmount,
+                intent.minOutputAmount,
+                intent.recipient,
+                intent.deadline,
+                intent.topicTier,
+                intent.preferredSolver
+            ))
+        ).recover(intentSig);
+    }
+
     function _hashIntent(Intent calldata intent) internal view returns (bytes32) {
         return _hashTypedDataV4(
             keccak256(abi.encode(
@@ -372,18 +401,4 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
         );
     }
 
-    function _validateRoute(bytes calldata route, address inputToken, address outputToken) internal pure {
-        uint256 len = route.length;
-        if (len < 43 || (len - 43) % 23 != 0) revert RouteInvalidLength(len);
-
-        address routeStart;
-        address routeEnd;
-        assembly {
-            routeStart := shr(96, calldataload(route.offset))
-            routeEnd   := shr(96, calldataload(add(route.offset, sub(len, 20))))
-        }
-
-        if (routeStart != inputToken)  revert RouteInputTokenMismatch(routeStart, inputToken);
-        if (routeEnd   != outputToken) revert RouteOutputTokenMismatch(routeEnd, outputToken);
-    }
 }

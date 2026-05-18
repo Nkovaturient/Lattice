@@ -14,6 +14,9 @@ contract SolverRegistry {
     uint256 public constant MIN_FILLS_TIER1 = 10; // fills required before tier-1
     uint256 public constant SLASH_AMOUNT = 0.01 ether;
     uint256 public constant MAX_PEERID_LENGTH = 128;
+    /// @dev Minimum time after `register` / each `recordFill` before `deregister` may withdraw stake.
+    /// Blocks same-block stake withdrawal griefing against in-flight `settle()` attempts.
+    uint64 public constant DEREGISTER_DELAY = 1 days;
 
     address public immutable settlementContract;
     address public immutable treasury;
@@ -28,11 +31,14 @@ contract SolverRegistry {
         uint256 stake;
         uint256 fills; // successful settlement count — anti-Sybil metric
         uint256 slashes; // slash count — reputation signal
+        uint64 deregisterAllowedAt; // unix timestamp — stake lock / exit timelock
         string peerId; // libp2p PeerID
     }
 
     mapping(address => SolverInfo) public solvers;
-    mapping(address => uint256) public nonces; // user intent nonces
+    /// @dev v1: user intent nonces live here; `IntentSettlement.nonces()` is the client read path.
+    /// v2: nonces move to `IntentSettlement`; use `NonceIncremented` / `NonceMigrated` events for cutover.
+    mapping(address => uint256) public nonces;
     mapping(string => address) public peerIdToAddress;
 
     // ── Events ────────────────────────────────────────────────────────────────
@@ -42,6 +48,12 @@ contract SolverRegistry {
     event SolverSlashed(address indexed solver, uint256 amount, string reason);
     event FillRecorded(address indexed solver, uint256 totalFills);
     event SlashedFundsSwept(address indexed treasury, uint256 amount);
+    /// @dev Emitted on each successful settlement nonce bump. Index for v2 `NonceMigrated` cutover scripts.
+    event NonceIncremented(address indexed user, uint256 newNonce);
+    /// @dev Reserved for v2: emitted when a user nonce is copied into `IntentSettlement` storage at migration.
+    event NonceMigrated(address indexed user, uint256 nonce);
+
+    error DeregisterTimelock(uint64 currentTime, uint64 allowedAt);
 
     constructor(address _settlementContract, address _treasury) {
         require(_settlementContract != address(0), "zero settlement");
@@ -54,7 +66,7 @@ contract SolverRegistry {
 
     function register(string calldata peerId, uint8 tier) external payable {
         require(!solvers[msg.sender].registered, "Already registered");
-        // require(bytes(peerId).length > 0, "Empty peerId");
+        require(bytes(peerId).length > 0, "Empty peerId");
         require(bytes(peerId).length <= MAX_PEERID_LENGTH, "PeerID too long");
         require(peerIdToAddress[peerId] == address(0), "PeerID taken");
         require(tier <= 1, "Invalid tier");
@@ -72,6 +84,7 @@ contract SolverRegistry {
             stake: msg.value,
             fills: solvers[msg.sender].fills,
             slashes: solvers[msg.sender].slashes,
+            deregisterAllowedAt: uint64(block.timestamp + DEREGISTER_DELAY),
             peerId: peerId
         });
         peerIdToAddress[peerId] = msg.sender;
@@ -101,6 +114,8 @@ contract SolverRegistry {
     function deregister() external {
         SolverInfo storage s = solvers[msg.sender];
         require(s.registered, "Not registered");
+        uint64 now_ = uint64(block.timestamp);
+        if (now_ < s.deregisterAllowedAt) revert DeregisterTimelock(now_, s.deregisterAllowedAt);
 
         delete peerIdToAddress[s.peerId];
         uint256 amount = s.stake;
@@ -136,8 +151,10 @@ contract SolverRegistry {
 
     function recordFill(address solver) external {
         require(msg.sender == settlementContract, "Only settlement");
-        solvers[solver].fills++;
-        emit FillRecorded(solver, solvers[solver].fills);
+        SolverInfo storage s = solvers[solver];
+        s.fills++;
+        s.deregisterAllowedAt = uint64(block.timestamp + DEREGISTER_DELAY);
+        emit FillRecorded(solver, s.fills);
     }
 
     /// @dev Stake slash when the solver is still registered with enough stake (generic protocol slash).
@@ -192,6 +209,7 @@ contract SolverRegistry {
     function incrementNonce(address user) external {
         require(msg.sender == settlementContract, "Only settlement");
         nonces[user]++;
+        emit NonceIncremented(user, nonces[user]);
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────

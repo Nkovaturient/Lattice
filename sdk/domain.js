@@ -18,6 +18,9 @@ export const DOMAIN = {
   verifyingContract: settlementAddressFromEnv(),
 }
 
+// EIP-712 encodeData: uint64 / uint8 are 32-byte right-padded in the struct hash (same as
+// Solidity abi.encode in IntentTypes.hashIntent). Use TypedDataEncoder or AbiCoder with
+// type uint64 — never hexZeroPad(deadline, 8) or other 8-byte manual encoding.
 export const INTENT_TYPE = {
   Intent: [
     { name: 'user',            type: 'address' },

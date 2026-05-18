@@ -80,9 +80,11 @@ Solidity contracts powering on-chain settlement, solver registration, and slashi
 
 ### Recent additions (v1.1)
 
-- **`IntentSettlement.nonces(address user)`** — passthrough view to `registry.nonces(user)`. All JS callers read nonces through the settlement address (EIP-712 `verifyingContract`).
-- **Route validation with custom errors** — `InvalidRouteLength`, `RouteInputTokenMismatch`, `RouteOutputTokenMismatch` revert early before `transferFrom` for diagnosable failures.
-- **40 Foundry tests** — nonce passthrough, route validation, replay protection, tier checks, slash mechanics across both `IntentSettlement` and `MockIntentSettlement`.
+- **`IntentSettlement.nonces(address user)`** — passthrough view to `registry.nonces(user)`. All JS callers read nonces through the settlement address (EIP-712 `verifyingContract`). Storage still lives on **`SolverRegistry`** in v1 (see **v2 nonce migration** below).
+- **`NonceIncremented`** on registry — index active users before a v2 cutover. **`NonceMigrated`** is reserved for the v2 import step.
+- **`pruneSettlementRecord(intentId)`** — after **`SLASH_WINDOW`** (7 days), anyone may delete `settlementActualOutput` / `settlementRecordedAt` if no slash occurred. **`slashForOverpromise`** deletes those slots immediately after slashing.
+- **`UniswapV3Route` library** — packed-path validation (length, endpoint tokens, non-zero bridge tokens, fee tiers 500/3000/10000) via `InvalidRouteLength`, `RouteInputTokenMismatch`, `RouteOutputTokenMismatch`, `RouteZeroHopToken`, `InvalidRouteFee` before `transferFrom`.
+- **55 Foundry tests** — nonce passthrough, route validation, replay protection, tier checks, slash mechanics across both `IntentSettlement` and `MockIntentSettlement`.
 
 ---
 
@@ -91,7 +93,8 @@ Solidity contracts powering on-chain settlement, solver registration, and slashi
 - **Solidity** `0.8.34` (pinned in `src` / `test` / `script`; `foundry.toml` `solc` matches)
 - **Foundry** — build, test, deploy (`via_ir = true` in `foundry.toml` for `IntentSettlement.settle` stack limits)
 - **OpenZeppelin Contracts v5** — `SafeERC20`, `ReentrancyGuard` (`lib/openzeppelin-contracts`, remapped as `@openzeppelin/contracts/`)
-- **Uniswap v3 SwapRouter** — `0xE592427A0AEce92De3Edee1F18E0157C05861564` (same address on all EVM chains)
+- **Uniswap V3 SwapRouter v1** — `SWAP_ROUTER` `0xE592427A0AEce92De3Edee1F18E0157C05861564` (immutable; same on Arbitrum One / Sepolia / mainnet). Uses v1 `exactInput` with `deadline` — not SwapRouter02 (`SWAP_ROUTER02` constant is reference-only).
+- **`IntentSettlementErrors`** — shared custom errors on production + mock (`parseError`-friendly); production no longer uses bare `require` strings for settlement paths
 
 ---
 
@@ -180,6 +183,57 @@ SETTLEMENT_CONTRACT_ADDRESS=0x... node scripts/settle.js
 
 Anvil's default funded account: `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`
 Private key: `0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80`
+
+---
+
+## v2 nonce migration (L-01) - Redeploy playbook, not requirement
+
+**v1 layout:** `SolverRegistry.nonces[user]` is authoritative; `IntentSettlement.incrementNonce` delegates via `registry.incrementNonce` and emits **`NonceIncremented`**.
+
+**Client rule (unchanged in v2):** always read **`settlementContract.nonces(user)`** — never hard-code the registry address in app code.
+
+**Cutover checklist** (when deploying v2 `IntentSettlement` with local `mapping(address => uint256) nonces`):
+
+1. **Freeze** v1 settlement (`pause()`).
+2. **Export** each active user’s nonce from the registry (subgraph on `NonceIncremented`, or `cast call registry.nonces(user)` per wallet).
+3. **Deploy** new registry + settlement pair (`LatticeDeployLib`).
+4. **Import** on the new settlement in one tx: `importNonces(users[], values[])` (owner-only on v2 contract), emitting **`NonceMigrated(user, nonce)`** per row. Values must match the v1 export — do **not** redeploy without import or pre-signed intents reset to nonce `0`.
+5. **Point** clients at the new settlement address (`SETTLEMENT_CONTRACT_ADDRESS` / EIP-712 `verifyingContract`).
+6. **Unpause** only after import confirms on-chain.
+
+`markExpired` and failed settles do **not** bump nonces; only successful `settle` does.
+
+---
+
+## Circular deploy (`SolverRegistry` ↔ `IntentSettlement`)
+
+Both contracts store **immutable** pointers to each other at construction:
+
+| Contract | Immutable | Set to |
+|---|---|---|
+| `SolverRegistry` | `settlementContract` | `IntentSettlement` address |
+| `IntentSettlement` | `registry` | `SolverRegistry` address |
+
+**Do not** deploy either contract alone with a placeholder settlement address — `settlementContract` can never be updated, and `recordFill` / `incrementNonce` / `slash` would call the wrong contract forever.
+
+### Recommended approach: nonce-predicted CREATE (v1)
+
+Use **`script/Deploy.s.sol`** (or `LatticeDeployLib.deployPair` in tests):
+
+1. Read deployer nonce `n`.
+2. Predict `IntentSettlement` at `computeCreateAddress(deployer, n + 1)`.
+3. Deploy `SolverRegistry(predicted, treasury)`.
+4. Deploy `IntentSettlement(registry)` — must match the prediction.
+
+Run both creations in **one** `forge script … --broadcast` (no other txs from the deployer between them). The script reverts if addresses do not cross-check.
+
+| Option | Use when | Why |
+|---|---|---|
+| **Nonce prediction** (current) | Default deploys, tests | Keeps both immutables; no admin setter; standard Foundry pattern |
+| **CREATE2 factory** | Same address on every chain / counterfactual UI | Extra contract + salt ops; add only if you need deterministic cross-chain addresses |
+| **Two-phase initializer** | — | **Not recommended** — mutable `settlementContract` is a trust window and foot-gun if init is skipped or front-run |
+
+`MockIntentSettlement` only needs the registry for tier checks; deploy via `deployMock(existingRegistry)` when swapping settlement on testnet.
 
 ---
 
@@ -285,13 +339,16 @@ source .env
 pip3 install slither-analyzer
 slither src/
 
+forge build
+forge test -v
+
 # Estimate deployment cost
-forge script script/Deploy.s.sol \
+forge script script/Deploy.s.sol:DeployAll \
   --rpc-url $ARB_MAINNET_RPC \
   --private-key $PRIVATE_KEY
 
 # Deploy + verify
-forge script script/Deploy.s.sol \
+forge script script/Deploy.s.sol:DeployAll \
   --rpc-url $ARB_MAINNET_RPC \
   --private-key $PRIVATE_KEY \
   --broadcast \
@@ -328,30 +385,35 @@ Run all 40 tests with `forge test -v`:
 
 | Test File | Coverage |
 |---|---|
-| `IntentSettlement.t.sol` (26 tests) | Nonce passthrough, nonce increment, nonce mismatch, route validation errors, replay, deadlines, tier, preferred solver, slash mechanics |
-| `MockIntentSettlement.t.sol` (14 tests) | Same validation matrix on the mock — nonce local storage, route errors, registration, tier, bid floor |
+| `IntentSettlement.t.sol` (28 tests) | Nonce passthrough, nonce increment, nonce mismatch, route validation errors, replay, deadlines, tier, preferred solver, slash mechanics |
+| `MockIntentSettlement.t.sol` (16 tests) | Same validation matrix on the mock — nonce local storage, route errors, registration, tier, bid floor |
 
 Key test categories:
 - **Nonce:** `test_NoncePassthroughMatchesRegistry`, `test_NonceIncrementAfterSettle`, `test_RevertNonceMismatch`
-- **Route validation:** `test_RevertInvalidRouteLength`, `test_RevertRouteInputTokenMismatch`, `test_RevertRouteOutputTokenMismatch`, `test_TwoHopRouteValid`
+- **Route validation:** `test_RevertInvalidRouteLength`, `test_RevertRouteInputTokenMismatch`, `test_RevertRouteOutputTokenMismatch`, `test_RevertRouteZeroHopToken`, `test_RevertInvalidRouteFee`, `test_TwoHopRouteValid`
+- **EIP-712:** `Eip712Golden.t.sol` + `npm run test:eip712` — `uint64`/`uint8` 32-byte padding; golden struct hash cross-check vs `IntentTypes.hashIntent` / `MockIntentSettlement.hashIntent`
+- **Deregister timelock:** `test_RevertDeregisterBeforeTimelock`, `test_RecordFillExtendsDeregisterTimelock`
 - **Replay:** `test_CannotSettleTwice`
-- **Slash:** `test_SettleRecordsOutputAndSlashForOverpromise`, `test_SlashForOverpromise_AfterPriorSlashAutoDeregister`
+- **Slash:** `test_SettleRecordsOutputAndSlashForOverpromise`, `test_SlashForOverpromise_AfterPriorSlashAutoDeregister` (includes replay guard)
 
 ---
 
 ## Security Notes
 
-- `SolverRegistry.settlementContract` is `immutable` — changing it requires redeployment
+- `SolverRegistry.settlementContract` is `immutable` — changing it requires redeployment; wire the pair only via `Deploy.s.sol` / `LatticeDeployLib` (see **Circular deploy** above)
 - `slash()` / `slashOverpromise()` are callable only by `IntentSettlement` — no admin grief vector; overpromise uses `slashOverpromise` so a solver who is already deregistered still gets `slashes++` and `SolverSlashed(..., 0, "overpromise")` when no stake remains to seize
 - `settle()` uses per-user nonces and marks `settled[intentId]` **before** the first external call (CEI); the function is `nonReentrant` (OpenZeppelin `ReentrancyGuard`) to block reentrant double-settlement
 - Signed intent fields **`preferredSolver`** and **`topicTier`** are enforced on-chain (`address(0)` preferred solver means open auction; `topicTier` requires `registry.solverTier(msg.sender) >= intent.topicTier`)
 - ERC20 paths use **`SafeERC20`** (`safeTransfer` / `safeTransferFrom`, `forceApprove` to the SwapRouter, allowance cleared to zero after the swap)
 - EIP-712 signature checks use **OpenZeppelin `ECDSA.tryRecover`** (not raw `ecrecover`): rejects **malleable** signatures (EIP-2 `s` range, `v` ∈ {27,28}) and does not treat a failed recovery as a match when `expected` is `address(0)`
-- **`slashForOverpromise(bid, bidSig)`** — no third argument. Slashing compares the bid’s `outputAmount` to **`settlementActualOutput[intentId]`** written at successful settlement, so callers cannot inject a fake “actual output”
-- **`deregister()`** returns stake with **`call{value:}`** (not `transfer`) so smart-wallet solvers are not bricked
+- **`slashForOverpromise(bid, bidSig)`** — no third argument. Slashing compares the bid’s `outputAmount` to **`settlementActualOutput[intentId]`** written at successful settlement, so callers cannot inject a fake “actual output”. **`slashedForOverpromise[intentId]`** allows at most one slash per intent (blocks replay griefing with the same bid+sig). Shortfall must be ≥ **`MIN_OVERPROMISE_BPS`** (0.1% of bid) so 1-wei dust cannot trigger a 0.01 ETH stake slash
+- **`IntentSettlement` / `MockIntentSettlement`** — `Ownable2Step` + `Pausable`: deployer is initial owner; **`pause()` / `unpause()`** gate **`settle()`** only (slash paths stay callable). Transfer ownership via two-step `transferOwnership` → `acceptOwnership`. Consider a multisig or timelock as owner on mainnet
+- **`deregister()`** — **`DEREGISTER_DELAY`** (1 day) after `register` and reset on each **`recordFill`**; reverts **`DeregisterTimelock`** until elapsed so solvers cannot same-block withdraw stake to grief in-flight **`settle()`** attempts. Returns stake with **`call{value:}`** (not `transfer`) so smart-wallet solvers are not bricked
 - If a slash leaves stake below the tier minimum, the registry **auto-deregisters** and **`call`s the residual stake** back to the solver (avoids locked ETH)
 - **`SolverRegistry`** is deployed as `new SolverRegistry(predictedSettlement, treasury)` — each **`SLASH_AMOUNT`** increments **`slashProceedsBalance`**; **`sweepSlashedFunds()`** ( **`treasury` only** ) sends that balance to **`treasury`**
-- **`settle()`** requires **`bid.deadline <= intent.deadline`** and **`inputToken` / `outputToken` ≠ `address(0)`** (v1 is ERC20-only; use WETH for ETH — see `IntentTypes`)
+- **`settle()`** requires **`bid.deadline <= intent.deadline`** and **`inputToken` / `outputToken` ≠ `address(0)`** (v1 is ERC20-only; use WETH for ETH — see `IntentTypes`); also **`recipient ≠ 0`**, **`inputAmount > 0`**, **`minOutputAmount > 0`** (blocks burned outputs, nonce-wasting no-ops, and full-output fee capture when min is zero)
+- **`markExpired(intent, intentSig)`** — after `deadline`, anyone can tombstone with a valid user signature; emits **`IntentExpired`** and sets **`settled[intentId]`** (nonce unchanged). Stops repeated failed `settle` RPC spam; indexers should listen for this event
+- **`settlementActualOutput` / `settlementRecordedAt`** — pruned on slash immediately, or via **`pruneSettlementRecord`** after **`SLASH_WINDOW`** (7 days) if no slash. **`settled[intentId]`** stays true (replay protection)
 - Run full Slither audit before mainnet deployment
 
 ---
@@ -372,11 +434,11 @@ The intent's nonce doesn't match on-chain. Causes:
 
 Fix: Re-run `run-user.js` — it reads the current nonce before signing.
 
-### `InvalidRouteLength` / `RouteInputTokenMismatch` / `RouteOutputTokenMismatch`
+### `InvalidRouteLength` / `RouteInputTokenMismatch` / `RouteOutputTokenMismatch` / `RouteZeroHopToken` / `InvalidRouteFee`
 
-The solver's route doesn't match the intent's tokens. Check:
+`UniswapV3Route.validate` (used by both settlement contracts) reverts before `transferFrom`. Check:
 - `intent.inputToken` and `intent.outputToken` are valid ERC-20 addresses
-- The solver's pathfinding produces a route that starts with `inputToken` and ends with `outputToken`
+- The solver's path starts with `inputToken`, ends with `outputToken`, uses only fee tiers **500**, **3000**, or **10000**, and has no `address(0)` bridge token in multi-hop paths
 
 ### `Solver not registered`
 
