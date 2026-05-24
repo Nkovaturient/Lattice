@@ -14,6 +14,7 @@ import { SolverRegistryCache } from '../libp2p/registry-cache.js'
 import { TOPICS } from '../libp2p/topics.js'
 import { registerRFQHandler } from '../libp2p/rfq-protocol.js'
 import { initCodec } from '../sdk/intent-codec.js'
+import { loadOrCreateLibp2pPrivateKey } from './libp2p-key-store.js'
 
 /**
  * Create and start a solver node.
@@ -27,6 +28,8 @@ import { initCodec } from '../sdk/intent-codec.js'
  *   registryContract: ethers.Contract, // SolverRegistry on-chain
  *   provider:         ethers.Provider,
  *   computeSolution:  Function,        // injected DEX engine — see below
+ *   rfqCommitReveal?: boolean,         // two-phase RFQ for multi-solver auction
+ *   evmAddress?:       string,          // load/create persisted libp2p key for this wallet
  * }
  *
  * computeSolution signature (Track 3.3):
@@ -41,7 +44,13 @@ export async function createSolverNode(config) {
   // Pre-warm proto loader before any gossip or RFQ arrives
   await initCodec()
 
+  let libp2pPrivateKey
+  if (config.evmAddress) {
+    libp2pPrivateKey = await loadOrCreateLibp2pPrivateKey(config.evmAddress)
+  }
+
   const node = await createLibp2p({
+    ...(libp2pPrivateKey ? { privateKey: libp2pPrivateKey } : {}),
     addresses: {
       listen: [`/ip4/0.0.0.0/tcp/${config.port ?? 9000}/ws`],
     },
@@ -66,7 +75,18 @@ export async function createSolverNode(config) {
     ]
   })
 
-  await node.start()
+  try {
+    await node.start()
+  } catch (err) {
+    if (err?.code === 'EADDRINUSE') {
+      const port = config.port ?? 9000
+      throw new Error(
+        `Port ${port} already in use (EADDRINUSE). ` +
+        `Kill stale solver: lsof -ti :${port} | xargs kill`
+      )
+    }
+    throw err
+  }
   console.log(`[solver] started — ${node.peerId}`)
   console.log(`[solver] listening on:`, node.getMultiaddrs().map(a => a.toString()))
 
@@ -86,8 +106,10 @@ export async function createSolverNode(config) {
 
   // Track 3.1 — register /defi/rfq/1.0.0 with injected compute engine
   if (typeof config.computeSolution === 'function') {
-    registerRFQHandler(node, config.computeSolution)
-    console.log(`[solver] RFQ handler registered`)
+    registerRFQHandler(node, config.computeSolution, {
+      commitReveal: config.rfqCommitReveal === true,
+    })
+    console.log(`[solver] RFQ handler registered${config.rfqCommitReveal ? ' (commit-reveal)' : ''}`)
   } else {
     console.warn(`[solver] no computeSolution injected — RFQ handler not registered`)
   }
@@ -101,16 +123,34 @@ export async function createSolverNode(config) {
 }
 
 async function _prewarmConnections(node, peers) {
-  const results = await Promise.allSettled(
-    peers.map(({ multiaddr }) => node.dial(multiaddr))
-  )
-  const ok   = results.filter(r => r.status === 'fulfilled').length
-  const fail = results.filter(r => r.status === 'rejected').length
-  console.log(`[solver] pre-warmed ${ok}/${ok + fail} peers`)
+  const { multiaddr } = await import('@multiformats/multiaddr')
 
-  // Refresh every 30s — keep connections hot
-  setInterval(
-    () => Promise.allSettled(peers.map(({ multiaddr }) => node.dial(multiaddr))),
-    30_000
-  )
+  const peerIdFromAddr = (addr) => {
+    const p2p = multiaddr(addr).getComponents().find(c => c.name === 'p2p')
+    return p2p?.value ?? null
+  }
+
+  const report = async () => {
+    const connected = new Set(node.getPeers().map(p => p.toString()))
+    let linked = 0
+    for (const { multiaddr: addr } of peers) {
+      const id = peerIdFromAddr(addr)
+      if (id && connected.has(id)) linked++
+    }
+
+    const dialResults = await Promise.allSettled(
+      peers.map(({ multiaddr: addr }) => node.dial(multiaddr(addr)))
+    )
+    const dialed = dialResults.filter(r => r.status === 'fulfilled').length
+    const ok = Math.max(linked, dialed)
+
+    console.log(`[solver] worker links ${ok}/${peers.length} (${linked} inbound, ${dialed} outbound dial)`)
+    if (ok === 0) {
+      console.warn('[solver] no worker links yet — start workers on :9001/:9002 (they dial coordinator via BOOTSTRAP_PEERS)')
+    }
+    return ok
+  }
+
+  await report()
+  setInterval(() => { report() }, 5_000).unref?.()
 }

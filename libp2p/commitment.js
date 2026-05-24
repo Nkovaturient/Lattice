@@ -10,8 +10,9 @@
 // they committed at t=0 and can only reveal what they committed to.
 import { ethers } from 'ethers'
 
-export const COMMIT_WINDOW_MS  = 60   // commit phase duration
-export const REVEAL_WINDOW_MS  = 20   // reveal phase duration (total budget = 80ms)
+export const COMMIT_WINDOW_MS  = Number(process.env.COMMIT_WINDOW_MS ?? 2_000)
+export const REVEAL_WINDOW_MS  = Number(process.env.REVEAL_WINDOW_MS ?? 1_000)
+const RFQ_DIAL_TIMEOUT_MS      = Number(process.env.RFQ_DIAL_TIMEOUT_MS ?? 5_000)
 
 /**
  * Generate a commitment for a bid.
@@ -103,18 +104,22 @@ export class CommitRevealAuction {
     const commitPromises = this.peers.map(async (peerId) => {
       try {
         const stream = await this.node.dialProtocol(peerId, '/defi/rfq/1.0.0', {
-          signal: AbortSignal.timeout(COMMIT_WINDOW_MS),
+          signal: AbortSignal.timeout(RFQ_DIAL_TIMEOUT_MS),
         })
 
         // Send intent, receive commitment hash
-        const { encodeIntent, decodeBid } = await import('../sdk/intent-codec.js')
+        const { encodeIntent } = await import('../sdk/intent-codec.js')
         const { writeFramed, readFramed }  = await import('./rfq-internal.js')
 
         const intentBytes = await encodeIntent(this.intent)
         await writeFramed(stream, intentBytes)
 
-        // Solver responds with 32-byte commitment hash
-        const commitBytes = await readFramed(stream.source)
+        const commitBytes = await Promise.race([
+          readFramed(stream),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`commit response timeout (${COMMIT_WINDOW_MS}ms)`)), COMMIT_WINDOW_MS)
+          ),
+        ])
         if (commitBytes.length !== 32) throw new Error('Invalid commitment size')
 
         this.commitments.set(peerId.toString(), {
@@ -128,7 +133,7 @@ export class CommitRevealAuction {
 
     await Promise.race([
       Promise.allSettled(commitPromises),
-      new Promise(r => setTimeout(r, COMMIT_WINDOW_MS)),
+      new Promise(r => setTimeout(r, COMMIT_WINDOW_MS + RFQ_DIAL_TIMEOUT_MS)),
     ])
   }
 
@@ -144,7 +149,7 @@ export class CommitRevealAuction {
 
           // Receive { bid protobuf (N bytes) + salt (32 bytes) }
           // Frame layout: [4-byte bid length][bid bytes][32-byte salt]
-          const revealBytes = await readFramed(stream.source)
+          const revealBytes = await readFramed(stream)
           const bidLength   = new DataView(revealBytes.buffer).getUint32(0, false)
           const bidBytes    = revealBytes.slice(4, 4 + bidLength)
           const salt        = ethers.hexlify(revealBytes.slice(4 + bidLength))

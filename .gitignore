@@ -1,5 +1,6 @@
 node_modules/
 .env
+.lattice/
 .DS_Store
 /intent-only.json
 /settlement-pair.json
