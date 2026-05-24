@@ -107,7 +107,7 @@ async function main() {
 
   console.log(`[user] address: ${wallet.address}`)
   console.log(`[user] chain: ${chainId} (EIP-712 domain uses ${DOMAIN.chainId})`)
-  console.log(`[user] swap: ${inputAmount} ${inputToken.slice(0, 10)}… → min ${minOutputAmount} ${outputToken.slice(0, 10)}…`)
+  console.log(`[user] swap: ${inputAmount} USDC → min ${minOutputAmount} WETH`)
 
   await initCodec()
 
@@ -199,7 +199,7 @@ async function main() {
   for (const addr of bootstrapList) {
     try {
       await node.dial(multiaddr(addr))
-      console.log(`[user] dialed ${addr.slice(0, 52)}…`)
+      console.log(`[user] dialed ${addr}`)
     } catch (e) {
       console.warn(`[user] dial ${addr.slice(0, 40)}… failed:`, e.message)
     }

@@ -227,6 +227,87 @@ Maintainership narrative when things fail: mesh + signing can succeed while **`s
 
 ---
 
+## Learn-Test-and-Fix
+
+Multi-solver mesh on **Arbitrum Sepolia** (MockIntentSettlement) — problems hit during bring-up and how we fixed them.
+
+### Is commit-reveal doing what we think?
+
+**Yes.** Solvers hash `keccak256(intentId, outputAmount, routeHash, salt)` in phase 1 and only reveal the full bid in phase 2. A solver cannot change its quote after seeing a competitor's bid — it can only reveal what it committed to at t=0. That is the anti-sniping property; your logs show it working:
+
+```
+[auction] … — commit-reveal with 2 remote solver(s)
+[commit] phase 1 done — 2 commitments in 1205ms
+[commit] phase 2 done — 2 reveals in 1209ms
+[auction] … — closed at 1209ms, 2 bid(s)
+```
+
+Streams are **Noise XX + yamux** over WebSocket (`/defi/rfq/1.0.0`); bids never touch public mempool.
+
+### Sepolia multi-solver — working?
+
+**Functionally yes; latency not production-tight yet.**
+
+| Check | Status | Evidence |
+|---|---|---|
+| 3-node topology (coordinator + 2 workers) | OK | `worker links 2/2 (2 inbound, 2 outbound dial)` |
+| Gossip intent → coordinator auction | OK | User publish → `[auction] commit-reveal with 2 remote solver(s)` |
+| Both workers bid | OK | `2 commitments`, `2 reveals`, `2 bid(s)` |
+| Winner selection | OK | `winner: solver 0xbbb6f72686…` |
+| On-chain settle (mock) | OK | Worker 2: `[settle] tx: …/0xf75e48ca…` confirmed block 270795168 |
+| 80ms auction budget | **Not yet** | ~**1.2s** round-trip (local dev; `COMMIT_WINDOW_MS=2000`, compute + EIP-712 sign) |
+| Bid heterogeneity | Weak | Both workers quoted identical `54238200487945951` — set `SOLVER_MARGIN_BPS` **per worker** to differentiate |
+
+**Verdict:** Lattice private mesh + commit-reveal auction + remote winner settle is **E2E proven** on Sepolia. Optimize latency and bid diversity before calling it production-efficient.
+
+### Issues and fixes (chronological)
+
+- **Solo mesh only (`solverPeers: []`)** — Coordinator never RFQ'd workers. Added `SOLVER_PEER_ADDRS`, `AUCTION_ROLE=coordinator|worker`, commit-reveal RFQ on workers.
+- **PeerID mismatch after restart** — Random libp2p keys changed every boot; coordinator dialed stale IDs → RFQ timeout. Persist keys in `.lattice/libp2p-keys/<evm-address>.key`; register **after** first boot; `REGISTER_ACTION=deregister` + `peer-id` in `register-solver.js`.
+- **`multiaddr().getPeerId is not a function`** — libp2p v3 API change. Parse `/p2p/` via `getComponents()`.
+- **`pre-warmed 0/2` / "workers not listening"** — Misleading: workers connect **inbound**; outbound dial can fail while links are fine. Log `worker links N/M (inbound, outbound)`; poll up to 30s.
+- **Port 9001 `EADDRINUSE`** — Stale node process. Clear with `lsof -ti :9001 | xargs kill`; clearer error in `node/solver.js`.
+- **`stream.sink is not a function`** — libp2p v3 uses `stream.send()`, not it-pipe `sink`. Updated `rfq-internal.js`.
+- **`Stream ended after 1 bytes, expected 4`** — Async iteration on v3 streams is wrong; reads must use `@libp2p/utils` **`byteStream()`** (message events).
+- **`commit response timeout (300ms)`** — Window too tight for local compute + sign. Default `COMMIT_WINDOW_MS=2000`, `REVEAL_WINDOW_MS=1000`.
+- **RFQ handler signature** — libp2p v3 handler is `(stream, connection)`, not `({ stream, connection })`.
+- **Preflight L117 invalid bid signature** — Coordinator tried `settle()` with its key while winner was worker `0x9D48…` / `0xbbB6…`. **`msg.sender` must equal `bid.solver`**. Added `/defi/settle-win/1.0.0`: coordinator notifies remote winner; winning worker submits tx (see worker log: `[settle-win] auction won — submitting settle()`).
+
+### Verified E2E log chain (reference run)
+
+```
+# Coordinator
+[auction] commit-reveal with 2 remote solver(s)
+[commit] phase 1 done — 2 commitments in 1205ms
+[commit] phase 2 done — 2 reveals in 1209ms
+[auction] winner: solver 0xbbb6f72686… output: 54238200487945951
+[auction] remote winner 0xbbB6F726… — notifying worker to settle
+[auction] remote settle complete
+
+# Worker 2 (winner)
+[settle-win] auction won — submitting settle()
+[settle] tx: https://sepolia.arbiscan.io/tx/0xf75e48caeee42362b83ab7a601692f25a83dca2747583e0330aa7f99613ad020
+[settle] confirmed block 270795168; gasUsed 136769
+```
+
+### Multi-solver quick start (stable PeerIDs)
+
+```bash
+# 1) Workers first (note settle-win handler registered)
+SOLVER_INDEX=1 SOLVER_PORT=9001 AUCTION_ROLE=worker BOOTSTRAP_PEERS=/ip4/127.0.0.1/tcp/9000/ws/p2p/<coord> node scripts/run-solver.js
+SOLVER_INDEX=2 SOLVER_PORT=9002 AUCTION_ROLE=worker BOOTSTRAP_PEERS=/ip4/127.0.0.1/tcp/9000/ws/p2p/<coord> node scripts/run-solver.js
+
+# 2) Coordinator
+PRIVATE_KEY=$PRIVATE_KEY SOLVER_PEER_ADDRS=/ip4/127.0.0.1/tcp/9001/ws/p2p/<w1>,/ip4/127.0.0.1/tcp/9002/ws/p2p/<w2> node scripts/run-solver.js
+
+# 3) User
+BOOTSTRAP_PEERS=/ip4/127.0.0.1/tcp/9000/ws/p2p/<coord> node scripts/run-user.js
+```
+
+Register workers with persisted PeerIDs: `REGISTER_ACTION=peer-id SOLVER_INDEX=N` then `PEER_ID=… node scripts/register-solver.js`.
+
+---
+
 ## Tech stack
 
 | Concern | Choice |

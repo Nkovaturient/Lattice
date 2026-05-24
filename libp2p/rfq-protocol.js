@@ -1,48 +1,12 @@
 // /defi/rfq/1.0.0 stream protocol
 // Direct encrypted solver negotiation over yamux streams.
 // Wire format: [4-byte big-endian uint32 length] + [protobuf payload]
+import { ethers } from 'ethers'
 import { encodeIntent, encodeBid, decodeBid, decodeIntent } from '../sdk/intent-codec.js'
+import { createCommitment } from './commitment.js'
+import { writeFramed, readFramed, closeStreamWrite } from './rfq-internal.js'
 
 export const RFQ_PROTOCOL = '/defi/rfq/1.0.0'
-
-// ── Byte framing helpers ──────────────────────────────────────────────────────
-
-// Write a length-prefixed message into a stream sink
-async function writeFramed(stream, payload) {
-  const frame = new Uint8Array(4 + payload.length)
-  const view  = new DataView(frame.buffer)
-  view.setUint32(0, payload.length, false)  // big-endian uint32
-  frame.set(payload, 4)
-  await stream.sink([frame])
-}
-
-// Read exactly n bytes from an async-iterable stream source.
-// Loops across chunks — chunks have no guaranteed boundary alignment.
-async function readExact(source, n) {
-  const buf = new Uint8Array(n)
-  let offset = 0
-  for await (const chunk of source) {
-    const bytes  = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
-    const needed = n - offset
-    if (bytes.length >= needed) {
-      buf.set(bytes.subarray(0, needed), offset)
-      return buf          // accumulated enough — done
-    }
-    buf.set(bytes, offset)
-    offset += bytes.length  // need more chunks — keep reading
-  }
-  throw new Error(`Stream ended after ${offset} bytes, expected ${n}`)
-}
-
-// Read one length-prefixed frame from a stream source
-async function readFramed(source) {
-  const lenBuf = await readExact(source, 4)
-  const length = new DataView(lenBuf.buffer).getUint32(0, false)  // big-endian
-  if (length === 0 || length > 1_048_576) {
-    throw new Error(`Invalid frame length: ${length}`)             // sanity: 0 < len < 1MB
-  }
-  return readExact(source, length)
-}
 
 // ── Solver side — incoming RFQ handler ───────────────────────────────────────
 
@@ -52,39 +16,79 @@ async function readFramed(source) {
  * computeSolution is injected from solver.js — keeps this file DEX-agnostic.
  * Signature: async (intent) => { solverAddress, outputAmount, encodedRoute, signature } | null
  */
-export function registerRFQHandler(node, computeSolution) {
-  node.handle(RFQ_PROTOCOL, async ({ stream, connection }) => {
+async function _writeSimpleBid(stream, intent, solution) {
+  const bidPayload = await encodeBid({
+    intentId:     intent.intentId,
+    solver:       solution.solverAddress,
+    outputAmount: solution.outputAmount,
+    route:        solution.encodedRoute,
+    deadline:     intent.deadline,
+    signature:    solution.signature,
+  })
+  await writeFramed(stream, bidPayload)
+}
+
+async function _writeCommitReveal(stream, intent, solution) {
+  const route = solution.encodedRoute
+  const bidForCommit = {
+    intentId:     intent.intentId,
+    outputAmount: solution.outputAmount,
+    route,
+  }
+  const { commitment, salt } = createCommitment(bidForCommit)
+
+  await writeFramed(stream, ethers.getBytes(commitment))
+
+  const revealSignal = await readFramed(stream)
+  if (new TextDecoder().decode(revealSignal) !== 'REVEAL') {
+    throw new Error('Expected REVEAL signal')
+  }
+
+  const bidPayload = await encodeBid({
+    intentId:     intent.intentId,
+    solver:       solution.solverAddress,
+    outputAmount: solution.outputAmount,
+    route,
+    deadline:     intent.deadline,
+    signature:    solution.signature,
+  })
+
+  const revealBytes = new Uint8Array(4 + bidPayload.length + 32)
+  new DataView(revealBytes.buffer).setUint32(0, bidPayload.length, false)
+  revealBytes.set(bidPayload, 4)
+  revealBytes.set(salt, 4 + bidPayload.length)
+  await writeFramed(stream, revealBytes)
+}
+
+/**
+ * @param {{ commitReveal?: boolean }} [options]
+ *   commitReveal=true — two-phase hash-then-reveal (multi-solver auction)
+ */
+export function registerRFQHandler(node, computeSolution, options = {}) {
+  const { commitReveal = false } = options
+
+  node.handle(RFQ_PROTOCOL, async (stream, connection) => {
     const peerId = connection.remotePeer.toString()
     try {
-      // 1. Read length-prefixed intent
-      const intentBytes = await readFramed(stream.source)
+      const intentBytes = await readFramed(stream)
       const intent      = await decodeIntent(intentBytes)
-
-      // 2. Delegate to injected compute engine (Track 3.3)
-      const solution = await computeSolution(intent)
+      const solution    = await computeSolution(intent)
 
       if (!solution) {
-        // Cannot fill — close without a bid; coordinator treats as timeout
         await stream.close()
         return
       }
 
-      // 3. Write length-prefixed bid back
-      const bidPayload = await encodeBid({
-        intentId:     intent.intentId,
-        solver:       solution.solverAddress,
-        outputAmount: solution.outputAmount,
-        route:        solution.encodedRoute,
-        deadline:     intent.deadline,
-        signature:    solution.signature,
-      })
-
-      await writeFramed(stream, bidPayload)
+      if (commitReveal) {
+        await _writeCommitReveal(stream, intent, solution)
+      } else {
+        await _writeSimpleBid(stream, intent, solution)
+      }
       await stream.close()
 
     } catch (err) {
       console.warn(`[rfq] handler error from ${peerId.slice(0, 12)}:`, err.message)
-      try { await stream.abort(err) } catch {}
+      try { stream.abort(err) } catch {}
     }
   })
 }
@@ -136,11 +140,9 @@ export async function requestBid(node, peerId, intent) {
     const intentBytes = await encodeIntent(intent)
     await writeFramed(stream, intentBytes)
 
-    // Half-close write side — solver knows intent is complete, starts computing
-    if (typeof stream.closeWrite === 'function') await stream.closeWrite()
+    await closeStreamWrite(stream)
 
-    // 2. Read bid
-    const bidBytes = await readFramed(stream.source)
+    const bidBytes = await readFramed(stream)
     const bid      = await decodeBid(bidBytes)
 
     // 3. Basic integrity checks
