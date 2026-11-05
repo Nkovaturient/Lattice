@@ -39,6 +39,51 @@ interface ISwapRouterTest {
     }
 }
 
+// Input token that tries to slash the solver from inside transferFrom.
+contract CallbackSlashToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    IntentSettlement settlement;
+    IntentTypes.Bid bid;
+    bytes bidSig;
+    bool armed;
+
+    function mint(address to, uint256 amt) external { balanceOf[to] += amt; }
+
+    function approve(address sp, uint256 amt) external returns (bool) {
+        allowance[msg.sender][sp] = amt;
+        return true;
+    }
+
+    function arm(IntentSettlement s, IntentTypes.Bid calldata b, bytes calldata sig) external {
+        settlement = s;
+        bid = b;
+        bidSig = sig;
+        armed = true;
+    }
+
+    function transfer(address to, uint256 amt) external returns (bool) {
+        require(balanceOf[msg.sender] >= amt);
+        balanceOf[msg.sender] -= amt;
+        balanceOf[to] += amt;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amt) external returns (bool) {
+        if (armed) {
+            armed = false;
+            try settlement.slashForOverpromise(bid, bidSig) {} catch {}
+        }
+        require(allowance[from][msg.sender] >= amt, "allowance");
+        require(balanceOf[from] >= amt, "balance");
+        allowance[from][msg.sender] -= amt;
+        balanceOf[from] -= amt;
+        balanceOf[to] += amt;
+        return true;
+    }
+}
+
 // SwapRouter stub — mints output to recipient (simulates swap); returns min + 10%
 contract MockSwapRouter {
     function exactInput(ISwapRouterTest.ExactInputParams calldata p)
@@ -307,6 +352,36 @@ contract IntentSettlementTest is Test {
         uint256 stakeBefore = registry.stake(solver);
         settlement.slashForOverpromise(slashBid, slashSig);
         assertLt(registry.stake(solver), stakeBefore);
+    }
+
+    function test_CallbackTokenCannotSlashDuringSettle() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        CallbackSlashToken input = new CallbackSlashToken();
+        input.mint(user, 1_000_000_000);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        intent.inputToken = address(input);
+
+        vm.prank(user);
+        input.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.outputAmount = 500_000_000_000_000_000;
+        bytes memory bSig = _signBid(bid, solverPK);
+        input.arm(settlement, bid, bSig);
+
+        uint256 stakeBefore = registry.stake(solver);
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        assertEq(registry.stake(solver), stakeBefore);
+        assertEq(registry.slashProceedsBalance(), 0);
+        bytes32 intentId = keccak256(
+            abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), IntentTypes.hashIntent(intent))
+        );
+        assertGt(settlement.settlementActualOutput(intentId), 0);
     }
 
     function test_SlashForOverpromise_AfterPriorSlashAutoDeregister() public {

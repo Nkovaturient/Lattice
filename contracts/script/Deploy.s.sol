@@ -25,14 +25,19 @@ contract DeployAll is Script {
     }
 
     function run() external {
+        // Unset TREASURY_ADDRESS keeps the deployer (demo EOA) on Sepolia and local chains.
+        // Arbitrum One (42161) reverts in the constructor unless this is a deployed contract (Safe).
+        address treasury = vm.envOr("TREASURY_ADDRESS", msg.sender);
+
         vm.startBroadcast();
 
         address deployer = msg.sender;
         uint64 nonce = vm.getNonce(deployer);
         address predictedSettlement = vm.computeCreateAddress(deployer, uint256(nonce) + 1);
 
-        registry = new SolverRegistry(predictedSettlement, deployer);
+        registry = new SolverRegistry(predictedSettlement, treasury);
         console.log("SolverRegistry deployed at:", address(registry));
+        console.log("Treasury:", treasury);
 
         settlement = new IntentSettlement(address(registry));
         console.log("IntentSettlement deployed at:", address(settlement));

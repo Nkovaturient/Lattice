@@ -85,7 +85,7 @@ flowchart TD
 | Propagation | GossipSub (2 topic tiers) | Intent gossip — public and tier-1 meshes |
 | Validation | Topic validators | Sig check + deadline + registry, ~1.3ms |
 | Negotiation | `/defi/rfq/1.0.0` streams | Direct solver-to-solver bid exchange |
-| Settlement | `IntentSettlement.sol` | On-chain verify, execute, pay solver |
+| Settlement | `IntentSettlement.sol` | On-chain verify, Uniswap v3 `SwapRouter.exactInput` (`contracts/src/IntentSettlement.sol` lines 151–159), pay solver |
 | Trust anchor | `SolverRegistry.sol` | Stake, register, slash — PeerID ↔ EVM binding |
 
 

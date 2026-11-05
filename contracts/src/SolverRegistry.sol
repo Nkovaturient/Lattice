@@ -14,8 +14,10 @@ contract SolverRegistry {
     uint256 public constant MIN_FILLS_TIER1 = 10; // fills required before tier-1
     uint256 public constant SLASH_AMOUNT = 0.01 ether;
     uint256 public constant MAX_PEERID_LENGTH = 128;
+    uint256 public constant ARBITRUM_ONE = 42161;
 
     address public immutable settlementContract;
+    /// @dev Immutable. On Arbitrum One this must be a contract (a Safe). An EOA cannot be swapped in later.
     address public immutable treasury;
 
     /// @dev ETH removed from solver stake accounting on slash — sweepable by `treasury` only.
@@ -46,6 +48,9 @@ contract SolverRegistry {
     constructor(address _settlementContract, address _treasury) {
         require(_settlementContract != address(0), "zero settlement");
         require(_treasury != address(0), "zero treasury");
+        if (block.chainid == ARBITRUM_ONE) {
+            require(_treasury.code.length > 0, "mainnet treasury must be a contract");
+        }
         settlementContract = _settlementContract;
         treasury = _treasury;
     }

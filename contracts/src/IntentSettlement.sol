@@ -199,8 +199,9 @@ contract IntentSettlement is ReentrancyGuard {
      * Uses the output amount recorded at settlement time — callers cannot inject a fake actualOutput.
      * Uses `slashOverpromise` so deregistered solvers (e.g. after an earlier auto-slash) still get
      * `slashes` / events when no stake remains to take.
+     * Shares `settle`'s reentrancy guard so a callback token cannot slash while `settlementActualOutput` is still unset.
      */
-    function slashForOverpromise(IntentTypes.Bid calldata bid, bytes calldata bidSig) external {
+    function slashForOverpromise(IntentTypes.Bid calldata bid, bytes calldata bidSig) external nonReentrant {
         bytes32 bidHash = _domainHash(bid.hashBid());
         require(_verifySignature(bidHash, bidSig, bid.solver), "Invalid bid signature");
 
