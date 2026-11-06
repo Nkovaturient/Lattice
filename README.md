@@ -12,7 +12,7 @@
 </p>
 
 <div align="center">
-<img src="https://github.com/user-attachments/assets/2553ca98-6769-406f-af53-49162d9b99d2" height="500" />
+<img src="assets/l1.png" alt="Lattice intent mesh on Arbitrum" width="100%" />
 </div>
 
 </div>
@@ -37,6 +37,10 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
 - Modern DeFi leaks intent data too early. The moment a swap hits a public RPC or mempool, searchers can front-run it. Existing solver networks patch this with centralized off-chain APIs — which defeats the point.
 
 - Lattice moves coordination entirely peer-to-peer: intents propagate through an encrypted solver mesh, auctions resolve in under 100ms, and only the winning solution touches the chain.
+
+<div align="center">
+  <img src="assets/lattice-banner.png" alt="Public mempool searchers versus Lattice private solver mesh" width="100%" />
+</div>
 
 
 
@@ -63,6 +67,10 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
 
 ## How it works
 
+<div align="center">
+  <img src="assets/l2.png" alt="libp2p mesh, 80ms commit-reveal auction, Arbitrum settlement" width="100%" />
+</div>
+
 ```mermaid
 flowchart TD
     A[User signs Intent<br/>EIP-712] --> B[GossipSub Propagation<br/>across Solver Mesh]
@@ -73,7 +81,7 @@ flowchart TD
 ```
 
 - The _Networking_ layer is **js-libp2p** — Noise-encrypted connections, yamux multiplexing, Kademlia DHT for discovery, GossipSub for intent propagation. 
-- The _Trust_ layer is **EVM** — solver staking, slashing, and on-chain settlement via EIP-712 verified signatures.
+- The _Trust_ layer is **EVM** — solver stake with pull withdrawal, and on-chain settlement of EIP-712 signatures. The signed bid is the swap floor.
 
 
 ## Architecture at a glance
@@ -85,8 +93,8 @@ flowchart TD
 | Propagation | GossipSub (2 topic tiers) | Intent gossip — public and tier-1 meshes |
 | Validation | Topic validators | Sig check + deadline + registry, ~1.3ms |
 | Negotiation | `/defi/rfq/1.0.0` streams | Direct solver-to-solver bid exchange |
-| Settlement | `IntentSettlement.sol` | On-chain verify, Uniswap v3 `SwapRouter.exactInput` (`contracts/src/IntentSettlement.sol` lines 151–159), pay solver |
-| Trust anchor | `SolverRegistry.sol` | Stake, register, slash — PeerID ↔ EVM binding |
+| Settlement | `IntentSettlement.sol` | Verify both signatures, `SwapRouter.exactInput` with `amountOutMinimum = bid.outputAmount`. User receives at least that bid. Solver fee is 5% of surplus above it. |
+| Trust anchor | `SolverRegistry.sol` | Stake, register, `deregister` credits a pending balance, `withdraw()` pulls it. PeerID ↔ EVM binding. |
 
 
 ## Latency budget (80ms auction window)
@@ -109,7 +117,7 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 ### Phase 1 — Foundation
 - [x] **1.1** js-libp2p solver node — Noise, yamux, WebSocket, GossipSub, DHT
 - [x] **1.2** Peer discovery — bootstrap list, Kademlia DHT, connection pre-warming
-- [x] **1.3** `SolverRegistry.sol` — stake, register, slash, PeerID → EVM address binding
+- [x] **1.3** `SolverRegistry.sol` — stake, register, pull withdrawal, PeerID → EVM address binding
 
 ### Phase 2 — Intent Gossip & Validation
 - [x] **2.1** Intent schema — EIP-712 typed struct, protobuf wire format, `intentId` as GossipSub `messageId`
@@ -122,12 +130,12 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 - [x] **3.3** Solver compute engine — DEX pathfinding (Uniswap v3 / Curve), route encoding
 
 ### Phase 4 — EVM Settlement & Incentives
-- [x] **4.1** `IntentSettlement.sol` — verify EIP-712 intent + bid, execute route, pay solver
-- [ ] **4.2** Solver incentive model — fee split, slashing conditions, reputation → tier access
+- [x] **4.1** `IntentSettlement.sol` — verify EIP-712 intent + bid, execute the route at the signed output, pay the user at least that bid
+- [x] **4.2** Solver incentive model — 5% of surplus above the signed bid; stake exits through `withdraw()`; fills drive tier. A fill below the bid reverts and does not burn the nonce.
 
 ### Phase 5 — Hardening & Launch
 - [ ] **5.1** Latency benchmarking harness — per-hop timing, p99 profiling, geo simulation
-- [ ] **5.2** MEV resistance audit — timing attacks, solver collusion vectors, commit-reveal analysis
+- [x] **5.2** MEV resistance — commit-reveal auction (`libp2p/commitment.js`); `settle` reverts below `bid.outputAmount`
 
 
 ## Design decisions (locked)
@@ -145,6 +153,8 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 ## Arbitrum Sepolia — mesh → settlement
 
 End-to-end flow is **user** (`scripts/run-user.js`) over GossipSub → **solver** (`scripts/run-solver.js`) → optional **`IntentSettlement.settle`**.
+
+In the current contracts, `bid.outputAmount` is the on-chain floor. `settle` reverts if the swap returns less, and the nonce stays unused. Surplus above the bid pays the solver 5% (`SOLVER_FEE_BPS = 500`). A user cancels outstanding signatures with `invalidateNonce()`. After `deregister()`, stake is claimed with `withdraw()` — deregister does not push ETH. Standard ERC-20s only; fee-on-transfer and rebasing tokens revert. The Sepolia bytecode already deployed does not include this yet; redeploy before pointing `.env` at it.
 
 ### Prerequisites (one-time per user wallet)
 
@@ -263,7 +273,7 @@ Streams are **Noise XX + yamux** over WebSocket (`/defi/rfq/1.0.0`); bids never 
 ### Issues and fixes (chronological)
 
 - **Solo mesh only (`solverPeers: []`)** — Coordinator never RFQ'd workers. Added `SOLVER_PEER_ADDRS`, `AUCTION_ROLE=coordinator|worker`, commit-reveal RFQ on workers.
-- **PeerID mismatch after restart** — Random libp2p keys changed every boot; coordinator dialed stale IDs → RFQ timeout. Persist keys in `.lattice/libp2p-keys/<evm-address>.key`; register **after** first boot; `REGISTER_ACTION=deregister` + `peer-id` in `register-solver.js`.
+- **PeerID mismatch after restart** — Random libp2p keys changed every boot; coordinator dialed stale IDs → RFQ timeout. Persist keys in `.lattice/libp2p-keys/<evm-address>.key`; register **after** first boot. `REGISTER_ACTION=deregister` credits stake; call `withdraw()` on the registry before `peer-id` re-registration. `register-solver.js` does not send that `withdraw()` yet.
 - **`multiaddr().getPeerId is not a function`** — libp2p v3 API change. Parse `/p2p/` via `getComponents()`.
 - **`pre-warmed 0/2` / "workers not listening"** — Misleading: workers connect **inbound**; outbound dial can fail while links are fine. Log `worker links N/M (inbound, outbound)`; poll up to 30s.
 - **Port 9001 `EADDRINUSE`** — Stale node process. Clear with `lsof -ti :9001 | xargs kill`; clearer error in `node/solver.js`.
