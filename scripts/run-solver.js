@@ -62,13 +62,19 @@ if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC) {
   process.exit(1)
 }
 
-const WATCHED_POOLS_ARB_SEPOLIA = [
-  '0x66EEAB70aC52459Dd74C6AD50D578Ef76a441bbf', // USDC/WETH 0.3%
-  '0x6F112d524DC998381C09b4e53C7e5e2cc260f877', // USDC/WETH 0.05%
-]
+const WATCHED_POOLS = {
+  421614: [
+    '0x66EEAB70aC52459Dd74C6AD50D578Ef76a441bbf', // USDC/WETH 0.3%
+    '0x6F112d524DC998381C09b4e53C7e5e2cc260f877', // USDC/WETH 0.05%
+  ],
+  42161: [
+    '0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c', // USDC/WETH 0.3%
+    '0xC6962004f452bE9203591991D15f6b388e09E8D0', // USDC/WETH 0.05%
+  ],
+}
 
 async function main() {
-  const chainIdNum = Number(process.env.ARB_SEPOLIA_CHAIN_ID ?? process.env.CHAIN_ID ?? 421614)
+  const chainIdNum = Number(process.env.CHAIN_ID ?? process.env.ARB_SEPOLIA_CHAIN_ID ?? 421614)
   const provider = createRatedJsonRpcProvider(ARB_SEPOLIA_RPC, chainIdNum)
   const wallet  = new ethers.Wallet(PRIVATE_KEY, provider)
   const network = await provider.getNetwork()
@@ -86,7 +92,9 @@ async function main() {
   await initCodec()
 
   const poolCache = new PoolStateCache(provider)
-  await poolCache.start(WATCHED_POOLS_ARB_SEPOLIA)
+  const watchedPools = WATCHED_POOLS[Number(network.chainId)]
+  if (!watchedPools) throw new Error(`No watched Uniswap pools configured for chain ${network.chainId}`)
+  await poolCache.start(watchedPools)
 
   const registryContract = registryAddress
     ? new ethers.Contract(registryAddress, SolverRegistryABI, provider)

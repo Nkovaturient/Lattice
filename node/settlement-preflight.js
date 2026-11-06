@@ -333,17 +333,18 @@ export async function assertSettlementPreflight({
       throw new SettlementPreflightError(
         'quoter.revert',
         'QuoterV2.quoteExactInput reverted — swap would likely fail at the router',
-        'Check route validity, pool liquidity, and inputAmount. Set SETTLE_QUOTER_CHECK=0 to skip.'
+        'Check route validity, pool liquidity, and inputAmount. Unset SETTLE_QUOTER_CHECK to skip.'
       )
     }
     const bidOut = u256(bid.outputAmount)
     if (quoted < bidOut) {
-      console.warn(
-        `[preflight] quoter ${quoted} < bid.outputAmount ${bidOut} — solver may be overpromising (${ms}ms)`
+      throw new SettlementPreflightError(
+        'quoter.below-bid',
+        `QuoterV2 output ${quoted} < bid.outputAmount ${bidOut} — settle would revert "Output below bid"`,
+        'Re-bid at or below the live quote; the signed bid is the on-chain swap minimum.'
       )
-    } else {
-      console.log(`[preflight] quoter check passed: ${quoted} ≥ ${bidOut} (${ms}ms)`)
     }
+    console.log(`[preflight] quoter check passed: ${quoted} ≥ ${bidOut} (${ms}ms)`)
   }
 
   return { settleArgs, intentIdComputed, registryAddr }

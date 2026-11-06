@@ -26,7 +26,7 @@
 const DOMAIN = {
   name:              'IntentDeFi',
   version:           '1',
-  chainId:           1,                              // mainnet; 11155111 for Sepolia
+  chainId:           42161,                          // Arbitrum One; 421614 for Arbitrum Sepolia
   verifyingContract: SETTLEMENT_CONTRACT_ADDRESS,
 }
 ```
@@ -377,17 +377,25 @@ export class SolverRegistryCache {
     return registered
   }
 
-  // Invalidate immediately on chain events — don't wait for TTL
+  // Invalidate on chain events by polling eth_getLogs (registry.on() needs eth_newFilter,
+  // which many RPCs disable). Window capped at 2000 blocks; the 60s TTL is the fallback.
   #startEventListeners() {
-    this.registry.on('SolverRegistered', (evmAddress) => {
-      this.#invalidateByEvmAddress(evmAddress)
-    })
-    this.registry.on('SolverSlashed', (evmAddress) => {
-      this.#invalidateByEvmAddress(evmAddress)
-    })
-    this.registry.on('SolverDeregistered', (evmAddress) => {
-      this.#invalidateByEvmAddress(evmAddress)
-    })
+    const topics = ['SolverRegistered', 'SolverSlashed', 'SolverDeregistered']
+      .map(name => this.registry.interface.getEvent(name).topicHash)
+    let lastBlock = null
+    setInterval(async () => {
+      try {
+        const head = await this.provider.getBlockNumber()
+        lastBlock ??= head
+        if (head <= lastBlock) return
+        const logs = await this.provider.getLogs({
+          address: this.registry.target, topics: [topics],
+          fromBlock: Math.max(lastBlock + 1, head - 2000), toBlock: head,
+        })
+        for (const log of logs) this.#invalidateByEvmAddress(this.registry.interface.parseLog(log).args[0])
+        lastBlock = head
+      } catch { /* rely on TTL */ }
+    }, 15_000).unref()
   }
 
   #invalidateByEvmAddress(evmAddress) {
@@ -441,7 +449,7 @@ src/
 | `AUCTION_WINDOW_MS` | `80` | Fixed budget — solvers optimize to this |
 | `MAX_DEADLINE_OFFSET_SEC` | `600` | 10 min max intent lifetime |
 | `MIN_DEADLINE_OFFSET_SEC` | `60` | Prevent intents expiring before settlement tx lands |
-| `REGISTRY_CACHE_TTL_MS` | `60_000` | 60s — 5x mainnet block time |
+| `REGISTRY_CACHE_TTL_MS` | `60_000` | 60s fallback; events invalidate sooner |
 | `GOSSIP_MESH_D` | `4` | Tuned for 10–30 solver nodes |
 | `GOSSIP_HEARTBEAT_MS` | `500` | Half default — faster peer quality evaluation |
 | `SOLVER_RFQ_TIMEOUT_MS` | `60` | Per-solver timeout leaving 20ms for resolution |
@@ -449,10 +457,10 @@ src/
 
 ---
 
-## What This Spec Does NOT Cover (deferred)
+## Specified elsewhere (implemented)
 
 - Private RFQ topic (`intents/v1/evm/1/rfq/{address}`) → Track 3.1
 - Solver bid schema → Track 3.1
 - DEX route encoding inside bid → Track 3.3
 - IntentSettlement.sol → Track 4.1
-- Solver stake / slash logic → Track 4.2
+- Solver stake and incentives (stake withdrawal via `withdraw()`, 5% fee on surplus above the signed bid) → Track 4.2, implemented in `SolverRegistry.sol` / `IntentSettlement.sol`

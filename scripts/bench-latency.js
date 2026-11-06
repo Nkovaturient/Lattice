@@ -18,14 +18,33 @@ import { ethers } from 'ethers'
 import { createRatedJsonRpcProvider } from '../node/rpc-provider.js'
 import { quoteExactInput } from '../node/compute-engine.js'
 import { encodeSingleHop, FEE_TIERS } from '../node/route-encoder.js'
+import { TOPICS } from '../libp2p/topics.js'
 
 // ── Config ─────────────────────────────────────────────────────────────────────
+
+const BENCH_TOKENS = {
+  421614: {
+    USDC: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
+    WETH: '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73',
+  },
+  42161: {
+    USDC: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+    WETH: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
+  },
+}
+
+const chainId = Number(process.env.CHAIN_ID ?? process.env.ARB_SEPOLIA_CHAIN_ID ?? 421614)
+const tokens  = BENCH_TOKENS[chainId]
+if (!tokens) {
+  console.error(`No bench tokens for chain ${chainId} — supported: ${Object.keys(BENCH_TOKENS).join(', ')}`)
+  process.exit(1)
+}
 
 const {
   ARB_SEPOLIA_RPC,
   BENCH_QUOTER_RUNS   = '30',
-  BENCH_INPUT_TOKEN   = '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // USDC Arb Sepolia
-  BENCH_OUTPUT_TOKEN  = '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73', // WETH Arb Sepolia
+  BENCH_INPUT_TOKEN   = tokens.USDC,
+  BENCH_OUTPUT_TOKEN  = tokens.WETH,
   BENCH_AMOUNT_IN     = '1000000', // 1 USDC (6 dec)
 } = process.env
 
@@ -144,17 +163,17 @@ async function benchRfqDial(peerId, multiaddr) {
 // ── Main ───────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log(`[bench] Arb Sepolia — ${runs} runs each`)
+  console.log(`[bench] chain ${chainId} — ${runs} runs each`)
   console.log(`[bench] inputToken=${BENCH_INPUT_TOKEN} outputToken=${BENCH_OUTPUT_TOKEN} amountIn=${amountIn}\n`)
 
-  const provider = createRatedJsonRpcProvider(ARB_SEPOLIA_RPC)
+  const provider = createRatedJsonRpcProvider(ARB_SEPOLIA_RPC, chainId)
 
   const singleHop = encodeSingleHop(BENCH_INPUT_TOKEN, FEE_TIERS.MEDIUM, BENCH_OUTPUT_TOKEN)
   const twoHop    = new Uint8Array([
     ...ethers.getBytes(
       ethers.solidityPacked(
         ['address', 'uint24', 'address', 'uint24', 'address'],
-        [BENCH_INPUT_TOKEN, FEE_TIERS.LOW, '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73', FEE_TIERS.MEDIUM, BENCH_OUTPUT_TOKEN]
+        [BENCH_INPUT_TOKEN, FEE_TIERS.LOW, tokens.WETH, FEE_TIERS.MEDIUM, BENCH_OUTPUT_TOKEN]
       )
     )
   ])
@@ -176,7 +195,7 @@ async function main() {
 
   console.log('\n=== GossipSub propagation ===')
   console.log('  Mesh propagation (publish → solver received): instrument via run-mesh.js timestamps')
-  console.log('  Topic: /gossamer/intents/v1/evm/421614/0')
+  console.log(`  Topic: ${TOPICS.PUBLIC}`)
   console.log('  Dlo=2 Dhi=6 D=4 — alert when per-topic mesh count < Dlo')
   console.log('  Measure: pubsub.getMeshPeers(topic).length over time via bench-mesh multi-node harness')
 }

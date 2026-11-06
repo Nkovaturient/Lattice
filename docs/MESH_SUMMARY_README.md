@@ -1,6 +1,6 @@
 # Mesh + settlement implementation summary
 
-Concise changelog for **GossipSub mesh**, **Arbitrum Sepolia settlement**, **RPC stability**, **docs**.
+Concise changelog for **GossipSub mesh**, **settlement (Arbitrum Sepolia, then Arbitrum One)**, **RPC stability**, **docs**.
 
 ## GossipSub / topics (`libp2p/topics.js`)
 
@@ -38,6 +38,20 @@ Concise changelog for **GossipSub mesh**, **Arbitrum Sepolia settlement**, **RPC
 
 - **`batchMaxCount: 1`**, **`staticNetwork`**, tunable **`RPC_POLLING_INTERVAL_MS`**.
 - **`withRpcRetries`**: exponential backoff **+ `RPC_429_EXTRA_MS`** (default bumps **~63s** when response body mentions **429** / rate-limit) so public Arbitrum “reset in 60 seconds” windows aren’t exhausted by fast retries alone.
+
+---
+
+## Arbitrum One catch-up
+
+| Piece | Change |
+|---|---|
+| Contracts | Audit fixes H-1 → L-5; binding quote, 5% fee on surplus, pull `withdraw()`, `invalidateNonce()` |
+| `scripts/run-user.js`, `run-solver.js` | Per-chain defaults for 421614 and 42161 (tokens, watched pools); chain id from `CHAIN_ID ?? ARB_SEPOLIA_CHAIN_ID` |
+| `scripts/register-solver.js` | `deregister` followed by `withdraw()`; `REGISTER_ACTION=withdraw`; Arbiscan links per chain |
+| `node/settlement-preflight.js` | With `SETTLE_QUOTER_CHECK=1`, a quote below the signed bid is a hard failure (`quoter.below-bid`) |
+| `libp2p/registry-cache.js` | Registry events read with `eth_getLogs` (2000-block cap, 15s poll) instead of `eth_newFilter`, which many RPCs disable |
+| `scripts/bench-latency.js`, `settle-debug.js` | Chain-keyed token maps, mainnet defaults |
+| Token constants | WETH address checksum fixed in all scripts and `node/compute-engine.js` |
 
 ---
 

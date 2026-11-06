@@ -162,6 +162,19 @@ export const SolverRegistryABI = [
     },
     {
         "inputs": [],
+        "name": "ARBITRUM_ONE",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
         "name": "MAX_PEERID_LENGTH",
         "outputs": [
             {

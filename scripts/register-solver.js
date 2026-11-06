@@ -19,9 +19,10 @@
 //   SOLVER_INDEX=1 PEER_ID=<peer from run-solver on :9001> node scripts/register-solver.js
 //   SOLVER_INDEX=2 PEER_ID=<peer from run-solver on :9002> node scripts/register-solver.js
 //
-// Deregister (returns stake), then re-register with persisted PeerID:
+// Deregister (credits stake, then withdraw() pulls it), then re-register with persisted PeerID:
 //   REGISTER_ACTION=peer-id SOLVER_INDEX=1          # print stable PeerID from .lattice/
-//   REGISTER_ACTION=deregister SOLVER_INDEX=1
+//   REGISTER_ACTION=deregister SOLVER_INDEX=1       # deregister + withdraw
+//   REGISTER_ACTION=withdraw SOLVER_INDEX=1         # retry withdraw only
 //   SOLVER_INDEX=1 PEER_ID=<from peer-id cmd> node scripts/register-solver.js
 // // Registered tier 0 with above peerId - COORDINATOR PEER_ID - 12D3KooWQRLSb7SQwQKwe62zCjporEH3qVwc1juvpUpJhS7Dj4XS
 // /ip4/127.0.0.1/tcp/9000/ws/p2p/12D3KooWJdBPvDuYiCxDxwiQXKqBjmcY8YgRUazArzyJHwgjgJas
@@ -70,8 +71,26 @@ if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC || !REGISTRY_CONTRACT_ADDRESS) {
   process.exit(1)
 }
 
+let arbiscanBase = 'https://sepolia.arbiscan.io'
+
+async function withdrawPending(registry, address) {
+  const pending = await registry.pendingWithdrawals(address)
+  if (pending === 0n) {
+    console.log('Nothing pending to withdraw.')
+    return
+  }
+  console.log(`Withdrawing ${ethers.formatEther(pending)} ETH…`)
+  const tx = await registry.withdraw()
+  console.log(`  withdraw tx: ${tx.hash}`)
+  console.log(`  arbiscan: ${arbiscanBase}/tx/${tx.hash}`)
+  const receipt = await tx.wait()
+  console.log(`  confirmed in block ${receipt.blockNumber}`)
+}
+
 async function main() {
   const provider = new ethers.JsonRpcProvider(ARB_SEPOLIA_RPC)
+  const { chainId } = await provider.getNetwork()
+  if (chainId === 42161n) arbiscanBase = 'https://arbiscan.io'
   const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
   const registry = new ethers.Contract(REGISTRY_CONTRACT_ADDRESS, SolverRegistryABI, wallet)
 
@@ -110,13 +129,19 @@ async function main() {
     }
     console.log(`Deregistering ${wallet.address}…`)
     console.log(`  on-chain peerId: ${s.peerId}`)
-    console.log(`  stake returned:  ${ethers.formatEther(s.stake)} ETH`)
+    console.log(`  stake credited:  ${ethers.formatEther(s.stake)} ETH`)
     const tx = await registry.deregister()
-    console.log(`  tx: ${tx.hash}`)
-    console.log(`  arbiscan: https://sepolia.arbiscan.io/tx/${tx.hash}`)
+    console.log(`  deregister tx: ${tx.hash}`)
+    console.log(`  arbiscan: ${arbiscanBase}/tx/${tx.hash}`)
     const receipt = await tx.wait()
     console.log(`  confirmed in block ${receipt.blockNumber}`)
+    await withdrawPending(registry, wallet.address)
     console.log('\nNext: REGISTER_ACTION=peer-id SOLVER_INDEX=N  then register with that PEER_ID.')
+    return
+  }
+
+  if (REGISTER_ACTION === 'withdraw') {
+    await withdrawPending(registry, wallet.address)
     return
   }
 
@@ -173,7 +198,7 @@ async function main() {
 
   const tx = await registry.register(peerId, tier, { value: stakeAmt })
   console.log(`  tx: ${tx.hash}`)
-  console.log(`  arbiscan: https://sepolia.arbiscan.io/tx/${tx.hash}`)
+  console.log(`  arbiscan: ${arbiscanBase}/tx/${tx.hash}`)
 
   const receipt = await tx.wait()
   console.log(`  confirmed in block ${receipt.blockNumber}`)

@@ -137,6 +137,19 @@ function decodeRevert(hex) {
 }
 
 // ── Intent / bid loading ──────────────────────────────────────────────────────
+const DEBUG_TOKENS = {
+  421614: {
+    USDC: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
+    WETH: '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73',
+  },
+  42161: {
+    USDC: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+    WETH: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
+  },
+}
+
+const CHAIN_ID = Number(process.env.CHAIN_ID ?? process.env.ARB_SEPOLIA_CHAIN_ID ?? 421614)
+
 function loadIntentBid() {
   const envPath = process.env.INTENT_JSON
   if (envPath && existsSync(envPath)) {
@@ -149,8 +162,8 @@ function loadIntentBid() {
   console.log(`${C.yellow}No INTENT_JSON set — using env fixture (set INPUT_TOKEN etc.)${C.reset}`)
   const {
     PRIVATE_KEY,
-    INPUT_TOKEN    = '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
-    OUTPUT_TOKEN   = '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73',
+    INPUT_TOKEN    = DEBUG_TOKENS[CHAIN_ID]?.USDC,
+    OUTPUT_TOKEN   = DEBUG_TOKENS[CHAIN_ID]?.WETH,
     INPUT_AMOUNT   = '1000000',
     MIN_OUTPUT     = '100000000000000',
   } = process.env
@@ -191,7 +204,6 @@ async function main() {
     ARB_SEPOLIA_RPC,
     SETTLEMENT_CONTRACT_ADDRESS, INTENT_SETTLEMENT_ADDRESS,
     REGISTRY_CONTRACT_ADDRESS,   SOLVER_REGISTRY_ADDRESS,
-    ARB_SEPOLIA_CHAIN_ID = '421614',
   } = process.env
 
   if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC) {
@@ -209,7 +221,7 @@ async function main() {
     process.exit(1)
   }
 
-  const chainId  = Number(ARB_SEPOLIA_CHAIN_ID)
+  const chainId  = CHAIN_ID
   const provider = createRatedJsonRpcProvider(ARB_SEPOLIA_RPC, chainId)
   const wallet   = new ethers.Wallet(PRIVATE_KEY, provider)
 
@@ -225,12 +237,12 @@ async function main() {
     ok(`RPC is chain ${network.chainId} (${network.name})`)
   } else {
     fail(`RPC returned chainId ${network.chainId}, expected ${chainId}`,
-         'Check ARB_SEPOLIA_RPC points to Arbitrum Sepolia')
+         'Check ARB_SEPOLIA_RPC and CHAIN_ID point to the same chain')
   }
 
   const bal = await provider.getBalance(wallet.address)
   if (bal > 0n) ok(`Solver wallet balance: ${ethers.formatEther(bal)} ETH`)
-  else fail('Solver wallet has 0 ETH', 'Fund 0x…1Bf9 from a Sepolia faucet')
+  else fail('Solver wallet has 0 ETH', `Fund ${wallet.address} with ETH on chain ${chainId}`)
 
   // Check settlement contract exists (bytecode > 0)
   const code = await provider.getCode(settlementAddress)

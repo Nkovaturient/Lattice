@@ -1,71 +1,12 @@
-## Foundry
-
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
-
-Foundry consists of:
-
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
-
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
-```
-
-### Test
-
-```shell
-$ forge test
-```
-
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
-
-
 # Lattice — Smart Contracts
 
-Solidity contracts powering on-chain settlement, solver registration, and slashing.
+Solidity contracts for on-chain settlement and solver registration, deployed on **Arbitrum One**.
+
+| | |
+|---|---|
+| Solidity | `0.8.34`, `via_ir`, optimizer 200 runs |
+| Tests | 48 Foundry tests passing (30 `IntentSettlement`, 18 `MockIntentSettlement`) |
+| Audit status | H-1 → L-5 remediated, tracked in [`issues/`](issues/) |
 
 ---
 
@@ -74,15 +15,19 @@ Solidity contracts powering on-chain settlement, solver registration, and slashi
 | Contract | Purpose |
 |---|---|
 | `IntentTypes.sol` | EIP-712 type library shared by all contracts |
-| `SolverRegistry.sol` | Solver stake, register, slash, **`treasury` + `sweepSlashedFunds()`** — p2p trust anchor |
-| `IntentSettlement.sol` | Verify sigs, execute Uniswap v3 swap, pay solver, **`nonces(user)` passthrough** |
-| `MockIntentSettlement.sol` | Testnet drop-in — same validation, no SwapRouter call (proves coordination layer) |
+| `SolverRegistry.sol` | Solver stake, tiers, PeerID ↔ EVM binding, `deregister()` + pull `withdraw()`, immutable `treasury` |
+| `IntentSettlement.sol` | Verify both EIP-712 signatures, execute the Uniswap v3 swap, pay user and solver, `nonces(user)` and `invalidateNonce()` |
+| `MockIntentSettlement.sol` | Testnet drop-in — same validation, no SwapRouter call (proves the coordination layer) |
 
-### Recent additions (v1.1)
+### Current behavior
 
-- **`IntentSettlement.nonces(address user)`** — passthrough view to `registry.nonces(user)`. All JS callers read nonces through the settlement address (EIP-712 `verifyingContract`).
-- **Route validation with custom errors** — `InvalidRouteLength`, `RouteInputTokenMismatch`, `RouteOutputTokenMismatch` revert early before `transferFrom` for diagnosable failures.
-- **41 Foundry tests** — nonce passthrough, route validation, replay protection, tier checks, slash mechanics across both `IntentSettlement` and `MockIntentSettlement`.
+- **Binding quote** — `bid.outputAmount` is `amountOutMinimum` and the post-swap floor. A swap below it reverts with `Output below bid`; the nonce is not burned.
+- **Solver fee** — `SOLVER_FEE_BPS = 500`: 5% of the surplus above the signed bid. The user always receives at least the bid.
+- **Pull withdrawal** — `deregister()` credits `pendingWithdrawals`; `withdraw()` pays out.
+- **Cancellation** — `invalidateNonce()` bumps the caller's nonce and emits `NonceInvalidated`, voiding outstanding signatures.
+- **Nonce passthrough** — `IntentSettlement.nonces(user)` reads `registry.nonces(user)`; the EIP-712 `verifyingContract` is the settlement address.
+- **Route validation** — `InvalidRouteLength`, `RouteInputTokenMismatch`, `RouteOutputTokenMismatch` revert before `transferFrom`.
+- **No slashing path** — v1 has no slash function. `SLASH_AMOUNT`, `slashProceedsBalance`, `sweepSlashedFunds()` and the `SolverSlashed` event remain in the bytecode but are unreachable, so the sweepable balance is always zero.
 
 ---
 
@@ -91,13 +36,13 @@ Solidity contracts powering on-chain settlement, solver registration, and slashi
 - **Solidity** `0.8.34` (pinned in `src` / `test` / `script`; `foundry.toml` `solc` matches)
 - **Foundry** — build, test, deploy (`via_ir = true` in `foundry.toml` for `IntentSettlement.settle` stack limits)
 - **OpenZeppelin Contracts v5** — `SafeERC20`, `ReentrancyGuard` (`lib/openzeppelin-contracts`, remapped as `@openzeppelin/contracts/`)
-- **Uniswap v3 SwapRouter** — `0xE592427A0AEce92De3Edee1F18E0157C05861564` (same address on all EVM chains). Settlement calls `exactInput` at `src/IntentSettlement.sol` lines 151–159. The packed path is checked in `_validateRoute` (line 251): `token (20) + fee (3) + token (20)`. Off-chain encoding is `node/route-encoder.js`; quotes use QuoterV2 in `node/compute-engine.js`. The on-chain `QUOTER_V2` constant is not called. `MockIntentSettlement` skips the router when Sepolia pools have no liquidity
+- **Uniswap v3 SwapRouter** — `0xE592427A0AEce92De3Edee1F18E0157C05861564` (same address on all EVM chains). Settlement calls `exactInput`; the packed path is checked in `_validateRoute`: `token (20) + fee (3) + token (20)`. Off-chain encoding is `node/route-encoder.js`; quotes use QuoterV2 in `node/compute-engine.js`. The on-chain `QUOTER_V2` constant is not called. `MockIntentSettlement` skips the router when Sepolia pools have no liquidity
 
 ---
 
 ## Keys & Environment
 
-Create `foundry/.env`:
+Create `contracts/.env`:
 
 ```bash
 # Deployer wallet — needs ETH for gas
@@ -112,10 +57,6 @@ ARB_MAINNET_RPC=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
 # Arbiscan API key — for contract verification
 # Get at: https://arbiscan.io/myapikey
 ARBISCAN_API_KEY=...
-
-# Populated after deployment
-SETTLEMENT_CONTRACT_ADDRESS=0x...
-REGISTRY_CONTRACT_ADDRESS=0x...
 
 # Arbitrum One only — deployed Safe. The constructor rejects an EOA on chain id 42161.
 # Leave unset on Sepolia to keep the deployer as treasury.
@@ -139,7 +80,7 @@ TREASURY_ADDRESS=0x...
 ## Build & Test
 
 ```bash
-cd foundry
+cd contracts
 
 # Install Foundry (if not installed)
 curl -L https://foundry.paradigm.xyz | bash && foundryup
@@ -198,7 +139,7 @@ source .env
 # Build first — ensure new functions compile
 forge build
 
-# Run tests (41 tests should pass)
+# Run tests (48 should pass)
 forge test -v
 
 # Dry run (no broadcast)
@@ -214,23 +155,14 @@ forge script script/Deploy.s.sol \
   --verify \
   --etherscan-api-key $ARBISCAN_API_KEY
 
-# Verified Solver Registry contract
-forge verify-contract 0xbA8a94C43d7850adB3C0F9339a4630aBa704A919 \
-  src/SolverRegistry.sol:SolverRegistry \
-  --chain arbitrum-sepolia \
-  --etherscan-api-key $ARBISCAN_API_KEY \
-  --constructor-args $(cast abi-encode "constructor(address,address)" \
-    0x168E7554919e07dF4fc57616C1D4098d1C360C7C \
-    0x1Bf95a7322D3B207A5a6f1beed9dD2C8145558fC)
+# Verify manually if --verify failed (registry first, then settlement)
+forge verify-contract <REGISTRY> src/SolverRegistry.sol:SolverRegistry \
+  --chain arbitrum-sepolia --etherscan-api-key $ARBISCAN_API_KEY \
+  --constructor-args $(cast abi-encode "constructor(address,address)" <SETTLEMENT> <TREASURY>)
 
-# Verified Intent Settlement contract
-
-forge verify-contract 0x168E7554919e07dF4fc57616C1D4098d1C360C7C \
-  src/IntentSettlement.sol:IntentSettlement \
-  --chain arbitrum-sepolia \
-  --etherscan-api-key $ARBISCAN_API_KEY \
-  --constructor-args $(cast abi-encode "constructor(address)" \
-    0xbA8a94C43d7850adB3C0F9339a4630aBa704A919)
+forge verify-contract <SETTLEMENT> src/IntentSettlement.sol:IntentSettlement \
+  --chain arbitrum-sepolia --etherscan-api-key $ARBISCAN_API_KEY \
+  --constructor-args $(cast abi-encode "constructor(address)" <REGISTRY>)
 
 # Copy printed addresses into .env:
 # SETTLEMENT_CONTRACT_ADDRESS=0x...
@@ -280,42 +212,47 @@ From the application package root (`../` relative to this folder), `node scripts
 ## Deploy on Arbitrum Mainnet
 
 ```bash
-cd foundry
-
+cd contracts
 source .env
 
-# Audit contracts first — DO NOT skip this step
-# Recommended: Slither static analysis
-pip3 install slither-analyzer
+# Static analysis first
 slither src/
 
-# Treasury is immutable. Deploy a Safe first and export its address.
-# Chain id 42161 reverts if TREASURY_ADDRESS is an EOA.
+# Treasury is immutable. Deploy a Safe first; chain id 42161 reverts for an EOA.
 export TREASURY_ADDRESS=0xYourSafe
 
-# Estimate deployment cost
-forge script script/Deploy.s.sol \
-  --rpc-url $ARB_MAINNET_RPC \
-  --private-key $PRIVATE_KEY
+# Dry run
+forge script script/Deploy.s.sol --rpc-url $ARB_MAINNET_RPC --private-key $PRIVATE_KEY
 
 # Deploy + verify
 forge script script/Deploy.s.sol \
   --rpc-url $ARB_MAINNET_RPC \
   --private-key $PRIVATE_KEY \
-  --broadcast \
-  --verify \
+  --broadcast --verify \
   --etherscan-api-key $ARBISCAN_API_KEY \
-  --slow  # wait for each tx to be mined before next
+  --slow
+```
+
+Post-deploy checks:
+
+```bash
+cast call <REGISTRY>   "treasury()(address)"             --rpc-url $ARB_MAINNET_RPC   # your Safe
+cast call <REGISTRY>   "settlementContract()(address)"   --rpc-url $ARB_MAINNET_RPC   # IntentSettlement
+cast call <SETTLEMENT> "SOLVER_FEE_BPS()(uint256)"       --rpc-url $ARB_MAINNET_RPC   # 500
 ```
 
 ---
 
-## Contract Addresses (update after deploy)
+## Contract Addresses
 
 | Network | SolverRegistry | IntentSettlement |
 |---|---|---|
-| Arbitrum Sepolia | [Deployed contract](https://sepolia.arbiscan.io/address/0x57b68c7595b8de5376d7b3c6cdafcc415cb597d4) | [IS Deployed contract](https://sepolia.arbiscan.io/address/0x438b7889a1428f63f6450d3c1c2bab39f80edaca) |
-| Arbitrum Mainnet | `0x...` | `0x...` |
+| **Arbitrum One** (current) | [`0x469e747e4bEe661989DC7b1C988E0fBC87d5826d`](https://arbiscan.io/address/0x469e747e4bEe661989DC7b1C988E0fBC87d5826d) | [`0xdaB66B53c1041Ac60cD238beAe885f8741415025`](https://arbiscan.io/address/0xdaB66B53c1041Ac60cD238beAe885f8741415025) |
+| Arbitrum Sepolia (legacy, pre-audit bytecode) | [`0x57b6…97d4`](https://sepolia.arbiscan.io/address/0x57b68c7595b8de5376d7b3c6cdafcc415cb597d4) | [`0x438b…daca`](https://sepolia.arbiscan.io/address/0x438b7889a1428f63f6450d3c1c2bab39f80edaca) |
+
+Arbitrum One treasury (Gnosis Safe): [`0x3404F333B92DD849819F3C03e0eF18ec1035Dd6f`](https://arbiscan.io/address/0x3404F333B92DD849819F3C03e0eF18ec1035Dd6f)
+
+The Sepolia deployment predates the audit fixes. Redeploy before using it with the current scripts.
 
 ---
 
@@ -332,34 +269,36 @@ BID_TYPEHASH    = 0x2e1aa209d8a4134c9a8e7fe708d82167eaf3ac87abb2c5a79b7dae3708ae
 
 ## Foundry Test Matrix
 
-Run all 41 tests with `forge test -v`:
+Run all 48 tests with `forge test -v`:
 
 | Test File | Coverage |
 |---|---|
-| `IntentSettlement.t.sol` (25 tests) | Nonce passthrough, nonce increment, nonce mismatch, route validation errors, replay, deadlines, tier, preferred solver, binding bid output enforcement |
-| `MockIntentSettlement.t.sol` (14 tests) | Same validation matrix on the mock — nonce local storage, route errors, registration, tier, bid floor |
+| `IntentSettlement.t.sol` (30 tests) | Nonce passthrough and cancellation, route validation errors, replay, deadlines, tier, preferred solver, binding bid output, fee on surplus, pull withdrawal |
+| `MockIntentSettlement.t.sol` (18 tests) | Same validation matrix on the mock — local nonce storage, malformed-signature reverts, `invalidateNonce`, route errors, registration, tier, bid floor |
 
 Key test categories:
 - **Nonce:** `test_NoncePassthroughMatchesRegistry`, `test_NonceIncrementAfterSettle`, `test_RevertNonceMismatch`
 - **Route validation:** `test_RevertInvalidRouteLength`, `test_RevertRouteInputTokenMismatch`, `test_RevertRouteOutputTokenMismatch`, `test_TwoHopRouteValid`
-- **Replay:** `test_CannotSettleTwice`
+- **Replay and cancellation:** `test_CannotSettleTwice`, `test_InvalidateNonceCancelsPendingIntent`
+- **Signatures:** `test_RevertMalformedIntentSignature`, `test_RevertMalformedBidSignature`
 - **Binding bid & reentrancy:** `test_SettleEnforcesBidOutputMinimumOnRouter`, `test_RevertIfSwapOutputBelowBid`, `test_CallbackTokenCannotReenterSettle`
 
 ---
 
 ## Security Notes
 
-- `SolverRegistry.settlementContract` is `immutable` — changing it requires redeployment
-- `settle()` enforces the solver's signed **`bid.outputAmount`** directly as the Uniswap v3 `amountOutMinimum` and post-swap floor (`require(actualOutput >= bid.outputAmount, "Output below bid")`), eliminating post-settlement overpromise slashing and its replay surface
-- `settle()` uses per-user nonces and marks `settled[intentId]` **before** the first external call (CEI); the function is `nonReentrant` (OpenZeppelin `ReentrancyGuard`) to block reentrant double-settlement
-- Signed intent fields **`preferredSolver`** and **`topicTier`** are enforced on-chain (`address(0)` preferred solver means open auction; `topicTier` requires `registry.solverTier(msg.sender) >= intent.topicTier`)
-- ERC20 paths use **`SafeERC20`** (`safeTransfer` / `safeTransferFrom`, `forceApprove` to the SwapRouter, allowance cleared to zero after the swap)
-- **Standard ERC-20 tokens only:** Fee-on-transfer, deflationary, and rebasing tokens are unsupported. `settle()` passes exact `intent.inputAmount` to `SwapRouter.exactInput` and distributes the router's reported `actualOutput` directly; non-standard balance mutations will cause settlement to revert.
-- EIP-712 signature checks use **OpenZeppelin `ECDSA.tryRecover`** (not raw `ecrecover`): rejects **malleable** signatures (EIP-2 `s` range, `v` ∈ {27,28}) and does not treat a failed recovery as a match when `expected` is `address(0)`
-- **`deregister()`** returns stake with **`call{value:}`** (not `transfer`) so smart-wallet solvers are not bricked
-- **`SolverRegistry`** is deployed as `new SolverRegistry(predictedSettlement, treasury)` — **`sweepSlashedFunds()`** ( **`treasury` only** ) sends `slashProceedsBalance` to **`treasury`**. `treasury` is immutable. On Arbitrum One (`ARBITRUM_ONE`, chain id 42161) the constructor requires a contract, so mainnet must be given a Safe via `TREASURY_ADDRESS`. Sepolia can still use the deployer EOA
-- **`settle()`** requires **`bid.deadline <= intent.deadline`** and **`inputToken` / `outputToken` ≠ `address(0)`** (v1 is ERC20-only; use WETH for ETH — see `IntentTypes`)
-- Run full Slither audit before mainnet deployment
+- `SolverRegistry.settlementContract` and `treasury` are `immutable` — changing either requires redeployment.
+- `settle()` enforces the solver's signed **`bid.outputAmount`** as the Uniswap v3 `amountOutMinimum` and the post-swap floor (`Output below bid`). There is no post-settlement slashing, so there is no overpromise-slash replay surface.
+- `settle()` uses per-user nonces and marks `settled[intentId]` **before** the first external call (CEI); it is `nonReentrant` (OpenZeppelin `ReentrancyGuard`).
+- Users cancel outstanding signatures with **`invalidateNonce()`**.
+- Signed **`preferredSolver`** and **`topicTier`** are enforced on-chain (`address(0)` preferred solver means open auction; `topicTier` requires `registry.solverTier(msg.sender) >= intent.topicTier`).
+- ERC-20 paths use **`SafeERC20`** (`forceApprove` to the SwapRouter, allowance cleared to zero after the swap).
+- **Standard ERC-20 tokens only:** fee-on-transfer, deflationary and rebasing tokens are unsupported; `settle()` passes the exact `intent.inputAmount` to the router and distributes the reported `actualOutput`, so balance mutations make settlement revert.
+- EIP-712 checks use **OpenZeppelin `ECDSA.tryRecover`** in both `IntentSettlement` and the mock: malleable or malformed signatures revert and a failed recovery never matches `address(0)`.
+- **Pull withdrawals:** `deregister()` only credits `pendingWithdrawals`; `withdraw()` pays with `call{value:}` (not `transfer`) so smart-wallet solvers are not bricked, and a failing recipient cannot block the registry.
+- **Treasury** is a Safe on Arbitrum One; the constructor rejects an EOA on chain id 42161. Sepolia may use the deployer EOA.
+- **`settle()`** requires **`bid.deadline <= intent.deadline`** and non-zero `inputToken` / `outputToken` (v1 is ERC-20 only; use WETH for ETH).
+- Audit findings H-1 → L-5 are resolved and tracked in [`issues/`](issues/).
 
 ---
 
@@ -394,14 +333,12 @@ node scripts/register-solver.js
 ```
 
 ```
-PEER_ID=12D3KooWQRLSb7SQwQKwe62zCjporEH3qVwc1juvpUpJhS7Dj4XS  node scripts/register-solver.js
+SOLVER_INDEX=1 PEER_ID=<peerId> node scripts/register-solver.js
 Registering solver (tier 0)…
-  address:  0x1Bf95a7322D3B207A5a6f1beed9dD2C8145558fC
-  peerId:   12D3KooWQRLSb7SQwQKwe62zCjporEH3qVwc1juvpUpJhS7Dj4XS
   stake:    0.05 ETH
-  tx: 0x6eeba28229810fcfda370e0f4746d31d7f28cad5942e0ed235042c00b8fdf8f3
-  arbiscan: https://sepolia.arbiscan.io/tx/0x6eeba28229810fcfda370e0f4746d31d7f28cad5942e0ed235042c00b8fdf8f3
-  confirmed in block 265711857
+  tx: 0x…
+  arbiscan: https://arbiscan.io/tx/0x…
 ```
 
-- Next: run `node scripts/run-solver.js` with SOLVER_TIER=0 for public topic, or after 10+ fills run REGISTER_ACTION=upgrade then SOLVER_TIER=1.
+- Next: run `node scripts/run-solver.js`, or after 10+ fills run `REGISTER_ACTION=upgrade` for tier 1.
+- To leave: `REGISTER_ACTION=deregister` credits the stake and calls `withdraw()`.

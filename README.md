@@ -7,8 +7,8 @@
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/Status-Alpha-blue?style=for-the-badge" alt="Status"></a>
   <a href="#"><img src="https://img.shields.io/badge/Built%20with-js--libp2p-FF69B4?style=for-the-badge" alt="js-libp2p"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Chain-Arbitrum%20Sepolia-28A0F0?style=for-the-badge" alt="Arbitrum"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Latency-%3C100ms-success?style=for-the-badge" alt="Latency"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Chain-Arbitrum%20One-28A0F0?style=for-the-badge" alt="Arbitrum One"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Contracts-Verified%20on%20Arbiscan-success?style=for-the-badge" alt="Verified contracts"></a>
 </p>
 
 <div align="center">
@@ -24,7 +24,7 @@
 
 Users sign what they want. Solvers compete **privately** to fill it. The best solution lands on-chain. 
 
-**No mempool exposure. No MEV leaks. No trusted relayer.**
+**No public-mempool exposure. The signed bid is the on-chain floor.**
 
 
 > It earns the name on three levels — gossip (GossipSub is the propagation engine), lattice as in ultra-fine mesh fabric (the solver subnet topology), and the connotation of something fast and nearly invisible.
@@ -36,7 +36,7 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
 
 - Modern DeFi leaks intent data too early. The moment a swap hits a public RPC or mempool, searchers can front-run it. Existing solver networks patch this with centralized off-chain APIs — which defeats the point.
 
-- Lattice moves coordination entirely peer-to-peer: intents propagate through an encrypted solver mesh, auctions resolve in under 100ms, and only the winning solution touches the chain.
+- Lattice moves coordination entirely peer-to-peer: intents propagate through an encrypted solver mesh, solvers bid in a sealed commit-reveal auction (80ms target window), and only the winning solution touches the chain.
 
 <div align="center">
   <img src="assets/lattice-banner.png" alt="Public mempool searchers versus Lattice private solver mesh" width="100%" />
@@ -48,7 +48,7 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
 
 [Watch Demo](https://teal-secondary-antelope-34.mypinata.cloud/ipfs/bafybeief2j7zoo4dw4czinwzaumgfyzahwex5vjmny2a4gbrpcfidmgohe)
 
-> For demonstration, Lattice runs as a local multi-node simulation entirely in the terminal — spin up one bootstrap node, two or three solver nodes, and a user node using scripts, then fire a test intent through the gossip mesh using a simple CLI script that calls buildAndSignIntent() with a hardcoded wallet, publishes it to the GossipSub mesh, and prints each hop in real-time: intent received → validated → solver bids → auction winner → settlement tx hash. That's the demo — watching an intent travel from user signature to on-chain settlement in under 100ms, fully logged in the terminal, no browser needed.
+> The demo runs three local node processes (two workers and a coordinator) plus a user script against **Arbitrum One**. The user signs an EIP-712 intent, the mesh runs a sealed commit-reveal auction, and the winning solver submits `settle()` through Uniswap v3. Every step is logged in the terminal, ending in an Arbiscan tx link.
 
 <div align="center">
   <table>
@@ -82,6 +82,7 @@ flowchart TD
 
 - The _Networking_ layer is **js-libp2p** — Noise-encrypted connections, yamux multiplexing, Kademlia DHT for discovery, GossipSub for intent propagation. 
 - The _Trust_ layer is **EVM** — solver stake with pull withdrawal, and on-chain settlement of EIP-712 signatures. The signed bid is the swap floor.
+- The _Coordinator_ is a relay and auctioneer: it can censor an intent but cannot lower a signed bid or move user funds.
 
 
 ## Architecture at a glance
@@ -97,7 +98,7 @@ flowchart TD
 | Trust anchor | `SolverRegistry.sol` | Stake, register, `deregister` credits a pending balance, `withdraw()` pulls it. PeerID ↔ EVM binding. |
 
 
-## Latency budget (80ms auction window)
+## Latency budget (80ms target window)
 
 ```
 Intent propagation to solvers     10–20ms
@@ -109,7 +110,7 @@ Buffer                            10–15ms
 Total                             ~80ms
 ```
 
-Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is non-negotiable for the budget to hold.
+Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. Measured locally the commit-reveal round takes about 1–2s (`COMMIT_WINDOW_MS=2000`, compute + EIP-712 signing); the 80ms figure is the design target, not a measured result.
 
 
 ## Roadmap
@@ -136,6 +137,9 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 ### Phase 5 — Hardening & Launch
 - [ ] **5.1** Latency benchmarking harness — per-hop timing, p99 profiling, geo simulation
 - [x] **5.2** MEV resistance — commit-reveal auction (`libp2p/commitment.js`); `settle` reverts below `bid.outputAmount`
+- [x] **5.3** Audit remediation (H-1 → L-5, tracked in `contracts/issues/`) — 48 Foundry tests passing
+- [x] **5.4** Arbitrum One deployment — verified contracts, Gnosis Safe treasury
+- [ ] **5.5** Recorded live mainnet mesh run (2 solvers, QuoterV2, Uniswap v3)
 
 
 ## Design decisions (locked)
@@ -150,48 +154,83 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. This is 
 
 ---
 
-## Arbitrum Sepolia — mesh → settlement
+## Live on Arbitrum One
 
-End-to-end flow is **user** (`scripts/run-user.js`) over GossipSub → **solver** (`scripts/run-solver.js`) → optional **`IntentSettlement.settle`**.
+| Contract | Address |
+|---|---|
+| `IntentSettlement` | [`0xdaB66B53c1041Ac60cD238beAe885f8741415025`](https://arbiscan.io/address/0xdaB66B53c1041Ac60cD238beAe885f8741415025) |
+| `SolverRegistry` | [`0x469e747e4bEe661989DC7b1C988E0fBC87d5826d`](https://arbiscan.io/address/0x469e747e4bEe661989DC7b1C988E0fBC87d5826d) |
+| Treasury (Gnosis Safe, immutable) | [`0x3404F333B92DD849819F3C03e0eF18ec1035Dd6f`](https://arbiscan.io/address/0x3404F333B92DD849819F3C03e0eF18ec1035Dd6f) |
 
-In the current contracts, `bid.outputAmount` is the on-chain floor. `settle` reverts if the swap returns less, and the nonce stays unused. Surplus above the bid pays the solver 5% (`SOLVER_FEE_BPS = 500`). A user cancels outstanding signatures with `invalidateNonce()`. After `deregister()`, stake is claimed with `withdraw()` — deregister does not push ETH. Standard ERC-20s only; fee-on-transfer and rebasing tokens revert. The Sepolia bytecode already deployed does not include this yet; redeploy before pointing `.env` at it.
+| Uniswap v3 dependency | Address |
+|---|---|
+| SwapRouter | `0xE592427A0AEce92De3Edee1F18E0157C05861564` |
+| QuoterV2 | `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` |
+| USDC (native) / WETH | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` / `0x82aF49447D8a07e3bd95BD0d56f35241523fBab1` |
 
-### Prerequisites (one-time per user wallet)
+| Parameter | Value |
+|---|---|
+| Tier-0 stake | 0.05 ETH |
+| Tier-1 stake | 0.5 ETH and 10 fills |
+| Solver fee | 5% of surplus above the signed bid (`SOLVER_FEE_BPS = 500`) |
+| Swap floor | `amountOutMinimum = bid.outputAmount` |
 
-**Token approval is required before your first intent settles.** The solver calls `settle()` which pulls tokens from your wallet via `transferFrom`. Approve once (or with a high allowance) and you won't need to repeat until exhausted:
+How the contracts behave:
 
-```bash
-# Approve USDC (6 decimals) for IntentSettlement
-cast send 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d \
-  "approve(address,uint256)" \
-  $SETTLEMENT_CONTRACT_ADDRESS \
-  1000000000 \  # 1000 USDC — adjust as needed
-  --rpc-url "$ARB_SEPOLIA_RPC" \
-  --private-key "$PRIVATE_KEY"
-```
+- `settle` reverts with `Output below bid` if the swap returns less than the signed bid, and the nonce stays unused.
+- A user cancels outstanding signatures with `invalidateNonce()`.
+- `deregister()` credits `pendingWithdrawals`; the solver claims it with `withdraw()`.
+- Standard ERC-20s only. Fee-on-transfer and rebasing tokens revert.
+
+---
+
+## Run the mesh (end to end)
+
+Flow: **user** (`scripts/run-user.js`) → GossipSub → **coordinator** (`scripts/run-solver.js`) → RFQ to **workers** → winner submits **`IntentSettlement.settle`**.
 
 ### Environment (repo-root `.env`)
 
 ```bash
 PRIVATE_KEY=0x...
-ARB_SEPOLIA_RPC=https://arb-sepolia.g.alchemy.com/v2/YOUR_KEY
-ARB_SEPOLIA_CHAIN_ID=421614
+ARB_SEPOLIA_RPC=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY   # legacy variable name, any Arbitrum RPC
+ARB_SEPOLIA_CHAIN_ID=42161                                      # or CHAIN_ID; 421614 for Arbitrum Sepolia
 
-# Contract addresses (both required)
-SETTLEMENT_CONTRACT_ADDRESS=0x...   # IntentSettlement — nonces + settle
-REGISTRY_CONTRACT_ADDRESS=0x...     # SolverRegistry — solver stakes
+SETTLEMENT_CONTRACT_ADDRESS=0xdaB66B53c1041Ac60cD238beAe885f8741415025
+REGISTRY_CONTRACT_ADDRESS=0x469e747e4bEe661989DC7b1C988E0fBC87d5826d
 
-# Optional solver tuning
-# USE_QUOTER=1                      # call QuoterV2 for honest bids (adds ~10-30ms)
-# SOLVER_MARGIN_BPS=10              # shade bids by 0.10% for heterogeneity
-# RFQ_DIAL_TIMEOUT_MS=60            # default 60ms WS; set 40 for QUIC
+USE_QUOTER=1                # QuoterV2 for honest bids (adds ~10-30ms)
+SETTLE_QUOTER_CHECK=1       # preflight: refuse to settle if the quote is below the bid
+SOLVER_MARGIN_BPS=10        # shade bids for heterogeneity (set per worker)
+# RFQ_DIAL_TIMEOUT_MS=60
 ```
 
-### Run the solver
+`run-user.js`, `run-solver.js` and the bench scripts ship defaults for chain 42161 (USDC → WETH) and chain 421614.
+
+### One-time per user wallet
+
+`settle()` pulls the input token with `transferFrom`, so approve a small allowance first (2 USDC here):
 
 ```bash
-node scripts/run-solver.js
-# Logs its PeerID and multiaddr — copy for user's BOOTSTRAP_PEERS
+cast send 0xaf88d065e77c8cC2239327C5EDb3A432268e5831 \
+  "approve(address,uint256)" $SETTLEMENT_CONTRACT_ADDRESS 2000000 \
+  --rpc-url "$ARB_SEPOLIA_RPC" --private-key "$PRIVATE_KEY"
+```
+
+Revoke after testing: same call with amount `0`.
+
+### Register solvers (once each)
+
+```bash
+REGISTER_ACTION=peer-id SOLVER_INDEX=1 node scripts/register-solver.js              # print the stable PeerID
+SOLVER_INDEX=1 PEER_ID=<peerId> node scripts/register-solver.js                      # stake 0.05 ETH, tier 0
+REGISTER_ACTION=deregister SOLVER_INDEX=1 node scripts/register-solver.js            # credits stake, then withdraw()
+REGISTER_ACTION=withdraw   SOLVER_INDEX=1 node scripts/register-solver.js            # retry withdraw only
+```
+
+### Run the solver (single node)
+
+```bash
+node scripts/run-solver.js   # logs PeerID and multiaddr for the user's BOOTSTRAP_PEERS
 ```
 
 With `SETTLEMENT_CONTRACT_ADDRESS` set and `AUTO_SETTLE` not `false`, the winning bid auto-submits on-chain.
@@ -199,47 +238,51 @@ With `SETTLEMENT_CONTRACT_ADDRESS` set and `AUTO_SETTLE` not `false`, the winnin
 ### Run the user
 
 ```bash
-BOOTSTRAP_PEERS=/ip4/127.0.0.1/tcp/9000/ws/p2p/<solverPeerId> \
+BOOTSTRAP_PEERS=/ip4/127.0.0.1/tcp/9000/ws/p2p/<coordinatorPeerId> \
+INPUT_AMOUNT=1000000 MIN_OUTPUT=<min WETH wei> \
   node scripts/run-user.js
 ```
 
-The user reads `settlement.nonces(wallet)` to sign the correct nonce. If the deployed contract lacks the `nonces()` passthrough (pre-v1.1), set `REGISTRY_CONTRACT_ADDRESS` as fallback.
+The user reads `settlement.nonces(wallet)` to sign the correct nonce. Set `MIN_OUTPUT` below the live QuoterV2 quote or no solver can bid.
 
-### Demo
-
+### Which settlement contract
 
 | Goal | Contract | Notes |
 |---|---|---|
-| Full **`settle` tx** on Sepolia without SwapRouter failures | **`MockIntentSettlement`** | Deploy via `forge script ... deployMock(address)` (see [`contracts/README.md`](contracts/README.md)). Say: *coordination + trust layer is real; AMM execution is pluggable.* |
-| Real Uniswap path | **`IntentSettlement`** | Often hits empty / illiquid pools on testnet — use for infra debugging, not as the only demo. |
-| Credible **mesh** evidence | 2–3 solvers | Different `SOLVER_PORT`, shared `BOOTSTRAP_PEERS` to first solver’s multiaddr. One solver + one user is RFQ/local-compute valid but not a full mesh story. |
-
+| Real swap on Arbitrum One | **`IntentSettlement`** | Uniswap v3 via SwapRouter, QuoterV2 bids. This is the demo path. |
+| Testnet without pool liquidity | **`MockIntentSettlement`** | Same signing, nonce and tier checks, no SwapRouter call. Deploy with `deployMock(address)` ([`contracts/README.md`](contracts/README.md)). |
+| Mesh evidence | 2–3 solvers | Different `SOLVER_PORT`, shared `BOOTSTRAP_PEERS`. One solver plus one user is a valid RFQ test, not a mesh. |
 
 ### Troubleshooting
 
 | Error | Cause | Fix |
 |---|---|---|
-| `execution reverted (no data)` on `nonces()` | Deployed contract lacks `nonces()` passthrough | Redeploy contract OR set `REGISTRY_CONTRACT_ADDRESS` |
-| `Nonce mismatch` | Intent signed with stale nonce | Re-run `run-user.js` (reads fresh nonce) |
-| `transferFrom` reverts | User hasn't approved settlement | Run approval command above |
-| `Solver not registered` | Solver wallet not in registry | Run `node scripts/register-solver.js` |
-| HTTP 429 from RPC | Rate limited | Use keyed RPC; increase `RPC_429_EXTRA_MS` |
+| `bad address checksum` | Token address with wrong letter case | Use the checksummed addresses above |
+| `Output below bid` / `quoter.below-bid` | Live Uniswap quote is under the signed bid | Lower `MIN_OUTPUT` or raise `SOLVER_MARGIN_BPS` shading; nonce is not burned |
+| `Nonce mismatch` | Intent signed with a stale nonce | Re-run `run-user.js` |
+| `transferFrom` reverts | No USDC allowance or balance | Run the approval above; check balance |
+| `Solver not registered` | Wallet not in registry | `node scripts/register-solver.js` |
+| `Nothing to withdraw` | No pending stake | Call `deregister` first |
+| `execution reverted (no data)` on `nonces()` | Settlement contract lacks the passthrough (pre-v1.1) | Use the current deployment |
+| `Method disabled` on `eth_newFilter` | Old registry-cache build on a restricted RPC | Fixed: registry events are read with `eth_getLogs` |
+| `Block range is too large` | RPC `eth_getLogs` limit | Poll window is capped at 2000 blocks; lower it if your RPC is stricter |
+| HTTP 429 from RPC | Rate limited | Use a keyed RPC; raise `RPC_429_EXTRA_MS` |
 
 ### Operations notes
 
-Public Sepolia gateways aggressively **429** rate-limit. **Prefer a keyed provider** (Infura / Alchemy / QuickNode).
+Public gateways aggressively **429** rate-limit. **Prefer a keyed provider** (Alchemy / Infura / QuickNode).
 
 The repo configures a gentler ethers client in **[`node/rpc-provider.js`](node/rpc-provider.js)** (`batchMaxCount=1`, tunable **`RPC_POLLING_INTERVAL_MS`**, **`RPC_429_EXTRA_MS`** default long sleep on HTTP 429). **`submitSettlement`** wraps critical calls in **back-off retries**.
 
-If logs show **`settle revert`** with **`require(false)`** or a selector-only hex, the chain often surfaced **no `Error(string)`** — commonly **`SwapRouter.exactInput`** (path / liquidity / token quirks), not gossip. Prefer **keyed RPC + `cast call … settle.staticCall`** (or Tenderly) to isolate. To drop one RPC hop on flaky endpoints, set **`SETTLE_GAS_LIMIT`** (e.g. `800000`) so **`estimateGas`** is skipped after a successful **`staticCall`**.
+If logs show **`settle revert`** with **`require(false)`** or a selector-only hex, the chain often surfaced **no `Error(string)`** — commonly **`SwapRouter.exactInput`** (path / liquidity / token quirks), not gossip. Use **`cast call … settle.staticCall`** (or Tenderly) to isolate. Set **`SETTLE_GAS_LIMIT`** (e.g. `800000`) to skip **`estimateGas`** after a successful **`staticCall`**.
 
-Maintainership narrative when things fail: mesh + signing can succeed while **`settle` fails** — that’s **orthogonal layers** (P2P vs EVM infra). Showing **decoded revert where possible**, **429 retries**, and a **commercial RPC** proves production thinking.
+Mesh and signing can succeed while **`settle` fails**; those are separate layers (P2P vs EVM infra).
 
 ---
 
 ## Learn-Test-and-Fix
 
-Multi-solver mesh on **Arbitrum Sepolia** (MockIntentSettlement) — problems hit during bring-up and how we fixed them.
+Bring-up log for the multi-solver mesh. The reference run below was recorded on **Arbitrum Sepolia** with `MockIntentSettlement`; mainnet uses the same code path with `IntentSettlement`.
 
 ### Is commit-reveal doing what we think?
 
@@ -254,7 +297,7 @@ Multi-solver mesh on **Arbitrum Sepolia** (MockIntentSettlement) — problems hi
 
 Streams are **Noise XX + yamux** over WebSocket (`/defi/rfq/1.0.0`); bids never touch public mempool.
 
-### Sepolia multi-solver — working?
+### Multi-solver mesh — working?
 
 **Functionally yes; latency not production-tight yet.**
 
@@ -268,12 +311,12 @@ Streams are **Noise XX + yamux** over WebSocket (`/defi/rfq/1.0.0`); bids never 
 | 80ms auction budget | **Not yet** | ~**1.2s** round-trip (local dev; `COMMIT_WINDOW_MS=2000`, compute + EIP-712 sign) |
 | Bid heterogeneity | Weak | Both workers quoted identical `54238200487945951` — set `SOLVER_MARGIN_BPS` **per worker** to differentiate |
 
-**Verdict:** Lattice private mesh + commit-reveal auction + remote winner settle is **E2E proven** on Sepolia. Optimize latency and bid diversity before calling it production-efficient.
+**Verdict:** Lattice private mesh + commit-reveal auction + remote winner settle was **E2E proven** on Sepolia (reference run). Optimize latency and bid diversity before calling it production-efficient.
 
 ### Issues and fixes (chronological)
 
 - **Solo mesh only (`solverPeers: []`)** — Coordinator never RFQ'd workers. Added `SOLVER_PEER_ADDRS`, `AUCTION_ROLE=coordinator|worker`, commit-reveal RFQ on workers.
-- **PeerID mismatch after restart** — Random libp2p keys changed every boot; coordinator dialed stale IDs → RFQ timeout. Persist keys in `.lattice/libp2p-keys/<evm-address>.key`; register **after** first boot. `REGISTER_ACTION=deregister` credits stake; call `withdraw()` on the registry before `peer-id` re-registration. `register-solver.js` does not send that `withdraw()` yet.
+- **PeerID mismatch after restart** — Random libp2p keys changed every boot; coordinator dialed stale IDs → RFQ timeout. Persist keys in `.lattice/libp2p-keys/<evm-address>.key`; register **after** first boot. `REGISTER_ACTION=deregister` credits stake and `register-solver.js` then calls `withdraw()` before any `peer-id` re-registration.
 - **`multiaddr().getPeerId is not a function`** — libp2p v3 API change. Parse `/p2p/` via `getComponents()`.
 - **`pre-warmed 0/2` / "workers not listening"** — Misleading: workers connect **inbound**; outbound dial can fail while links are fine. Log `worker links N/M (inbound, outbound)`; poll up to 30s.
 - **Port 9001 `EADDRINUSE`** — Stale node process. Clear with `lsof -ti :9001 | xargs kill`; clearer error in `node/solver.js`.
@@ -281,9 +324,11 @@ Streams are **Noise XX + yamux** over WebSocket (`/defi/rfq/1.0.0`); bids never 
 - **`Stream ended after 1 bytes, expected 4`** — Async iteration on v3 streams is wrong; reads must use `@libp2p/utils` **`byteStream()`** (message events).
 - **`commit response timeout (300ms)`** — Window too tight for local compute + sign. Default `COMMIT_WINDOW_MS=2000`, `REVEAL_WINDOW_MS=1000`.
 - **RFQ handler signature** — libp2p v3 handler is `(stream, connection)`, not `({ stream, connection })`.
+- **`eth_newFilter` / `Method disabled` flood** — ethers `.on()` needs filters that many RPCs reject. `libp2p/registry-cache.js` now polls `eth_getLogs` (2000-block cap) and falls back to the 60s TTL.
+- **`bad address checksum`** — a mis-cased WETH constant; all token constants are now checksummed.
 - **Preflight L117 invalid bid signature** — Coordinator tried `settle()` with its key while winner was worker `0x9D48…` / `0xbbB6…`. **`msg.sender` must equal `bid.solver`**. Added `/defi/settle-win/1.0.0`: coordinator notifies remote winner; winning worker submits tx (see worker log: `[settle-win] auction won — submitting settle()`).
 
-### Verified E2E log chain (reference run)
+### Verified E2E log chain (Sepolia reference run)
 
 ```
 # Coordinator
@@ -322,7 +367,7 @@ Register workers with persisted PeerIDs: `REGISTER_ACTION=peer-id SOLVER_INDEX=N
 
 | Concern | Choice |
 |---|---|
-| P2P networking | js-libp2p v1.x |
+| P2P networking | js-libp2p v3.x |
 | Transport | WebSocket (TCP) |
 | Encryption | Noise XX |
 | Multiplexing | yamux |

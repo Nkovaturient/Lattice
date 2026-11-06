@@ -46,7 +46,7 @@ export function uniswapV3ForChain(chainId) {
   if (id === 42161) {
     return {
       FACTORY: '0x1F98431c8aD98523631AE4a59f267346ea31F984',
-      WETH:    '0x82aF49447D8a07e3bd95BD0d56f35241523FbAb1',
+      WETH:    '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
     }
   }
   if (id === 421614) {

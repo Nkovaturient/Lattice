@@ -2,15 +2,15 @@
 // Measures every stage of the auction pipeline and reports p50/p95/p99.
 // Run: node scripts/benchmark.js
 import { ethers } from 'ethers'
-import { initCodec, encodeIntent, decodeIntent, encodeBid, decodeBid } from '../src/sdk/intent-codec.js'
-import { computeIntentId } from '../src/sdk/intent-id.js'
-import { DOMAIN, INTENT_TYPE, BID_TYPE } from '../src/sdk/domain.js'
-import { buildBid, verifyBid } from '../src/sdk/bid-builder.js'
-import { encodeSingleHop, FEE_TIERS } from '../src/sdk/route-encoder.js'
+import { initCodec, encodeIntent, decodeIntent, encodeBid, decodeBid } from '../sdk/intent-codec.js'
+import { computeIntentId } from '../sdk/intent-id.js'
+import { DOMAIN, INTENT_TYPE, BID_TYPE } from '../sdk/domain.js'
+import { buildBid, verifyBid } from '../sdk/bid-builder.js'
+import { encodeSingleHop, FEE_TIERS } from '../node/route-encoder.js'
 
 const ITERATIONS = 500
-const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
-const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+const USDC = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' // Arbitrum One native USDC
+const WETH = '0x82aF49447D8a07e3bd95BD0d56f35241523FbAb1' // Arbitrum One WETH
 
 // ── Timing helpers ────────────────────────────────────────────────────────────
 

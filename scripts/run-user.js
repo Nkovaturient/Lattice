@@ -21,12 +21,20 @@ import { createRatedJsonRpcProvider } from '../node/rpc-provider.js'
 import { serializeIntentRecord } from '../node/settlement-snapshot.js'
 import { attachMeshMonitor, publishWithFallback, logMeshMetrics } from '../node/mesh-monitor.js'
 
-// ── Arb Sepolia defaults (Uniswap test tokens) ───────────────────────────────
-const DEFAULT_SWAP = {
-  INPUT_TOKEN:     '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // USDC
-  OUTPUT_TOKEN:    '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73', // WETH
-  INPUT_AMOUNT:    '1000000',              // 1 USDC (6 decimals)
-  MIN_OUTPUT:      '100000000000000',     // 0.0001 WETH (18 decimals) floor
+// ── Per-chain defaults: Arb Sepolia (Uniswap test tokens), Arb One (native USDC) ──
+const DEFAULT_SWAP_BY_CHAIN = {
+  421614: {
+    INPUT_TOKEN:     '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // USDC
+    OUTPUT_TOKEN:    '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73', // WETH
+    INPUT_AMOUNT:    '1000000',              // 1 USDC (6 decimals)
+    MIN_OUTPUT:      '100000000000000',     // 0.0001 WETH (18 decimals) floor
+  },
+  42161: {
+    INPUT_TOKEN:     '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', // USDC
+    OUTPUT_TOKEN:    '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', // WETH
+    INPUT_AMOUNT:    '1000000',
+    MIN_OUTPUT:      '100000000000000',
+  },
 }
 
 // ── Env ───────────────────────────────────────────────────────────────────────
@@ -47,6 +55,13 @@ const {
 
 if (!PRIVATE_KEY || !ARB_SEPOLIA_RPC) {
   console.error('Required: PRIVATE_KEY, ARB_SEPOLIA_RPC (e.g. in .env)')
+  process.exit(1)
+}
+
+const chainIdNum = Number(process.env.CHAIN_ID ?? process.env.ARB_SEPOLIA_CHAIN_ID ?? 421614)
+const DEFAULT_SWAP = DEFAULT_SWAP_BY_CHAIN[chainIdNum]
+if (!DEFAULT_SWAP) {
+  console.error(`No default swap for chain ${chainIdNum} — supported: ${Object.keys(DEFAULT_SWAP_BY_CHAIN).join(', ')}`)
   process.exit(1)
 }
 
@@ -94,14 +109,13 @@ async function waitForGossipsubMesh(pubsub, topic, { timeoutMs = 45_000, interva
 }
 
 async function main() {
-  const chainIdNum = Number(process.env.ARB_SEPOLIA_CHAIN_ID ?? process.env.CHAIN_ID ?? 421614)
   const provider   = createRatedJsonRpcProvider(ARB_SEPOLIA_RPC, chainIdNum)
   const wallet     = new ethers.Wallet(PRIVATE_KEY, provider)
   const network  = await provider.getNetwork()
   const chainId = Number(network.chainId)
   if (chainId !== DOMAIN.chainId) {
     console.warn(
-      `[user] RPC chainId ${chainId} ≠ DOMAIN.chainId ${DOMAIN.chainId} — set CHAIN_ID or ARB_SEPOLIA_CHAIN_ID in .env`
+      `[user] RPC chainId ${chainId} ≠ DOMAIN.chainId ${DOMAIN.chainId} — set CHAIN_ID in .env`
     )
   }
 
