@@ -62,7 +62,7 @@ contract SolverRegistry {
 
     function register(string calldata peerId, uint8 tier) external payable {
         require(!solvers[msg.sender].registered, "Already registered");
-        // require(bytes(peerId).length > 0, "Empty peerId");
+        require(bytes(peerId).length > 0, "Empty peerId");
         require(bytes(peerId).length <= MAX_PEERID_LENGTH, "PeerID too long");
         require(peerIdToAddress[peerId] == address(0), "PeerID taken");
         require(tier <= 1, "Invalid tier");

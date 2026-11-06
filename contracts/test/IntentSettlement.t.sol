@@ -176,6 +176,15 @@ contract IntentSettlementTest is Test {
         assertEq(registry.peerIdToAddress("12D3KooWTestPeerId"), solver);
     }
 
+    function test_RevertRegisterEmptyPeerId() public {
+        address newSolver = makeAddr("newSolver");
+        uint256 minStake = registry.MIN_STAKE();
+        vm.deal(newSolver, 1 ether);
+        vm.prank(newSolver);
+        vm.expectRevert("Empty peerId");
+        registry.register{value: minStake}("", 0);
+    }
+
     function test_NoncesStartAtZero() public view {
         assertEq(registry.nonces(user), 0);
     }
