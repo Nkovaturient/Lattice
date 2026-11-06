@@ -52,7 +52,6 @@ interface ISolverRegistry {
 
 contract MockIntentSettlement is EIP712, ReentrancyGuard {
     using SafeERC20 for IERC20;
-    using ECDSA     for bytes32;
 
     // ── EIP-712 type strings ──────────────────────────────────────────────────
     // Must match INTENT_TYPE and BID_TYPE in sdk/domain.js exactly.
@@ -217,7 +216,7 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
             revert SolverNotRegistered(msg.sender);
 
         // ── L112: intent EIP-712 signature ────────────────────────────────────
-        address recoveredIntent = _hashTypedDataV4(
+        bytes32 intentDigest = _hashTypedDataV4(
             keccak256(abi.encode(
                 INTENT_TYPEHASH,
                 intent.user,
@@ -231,9 +230,9 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
                 intent.topicTier,
                 intent.preferredSolver
             ))
-        ).recover(intentSig);
-
-        if (recoveredIntent != intent.user)
+        );
+        (address recoveredIntent, ECDSA.RecoverError intentErr,) = ECDSA.tryRecover(intentDigest, intentSig);
+        if (intentErr != ECDSA.RecoverError.NoError || recoveredIntent != intent.user)
             revert InvalidIntentSignature(recoveredIntent, intent.user);
 
         // ── L114: nonce ───────────────────────────────────────────────────────
@@ -244,18 +243,18 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
 
         // ── L117: bid EIP-712 signature ───────────────────────────────────────
         // route is dynamic bytes — hashed before encoding per EIP-712 spec.
-        address recoveredBid = _hashTypedDataV4(
+        bytes32 bidDigest = _hashTypedDataV4(
             keccak256(abi.encode(
                 BID_TYPEHASH,
                 bid.intentId,
                 bid.solver,
                 bid.outputAmount,
-                keccak256(bid.route),   // bytes are hashed per EIP-712 §2.3
+                keccak256(bid.route),
                 bid.deadline
             ))
-        ).recover(bidSig);
-
-        if (recoveredBid != msg.sender)
+        );
+        (address recoveredBid, ECDSA.RecoverError bidErr,) = ECDSA.tryRecover(bidDigest, bidSig);
+        if (bidErr != ECDSA.RecoverError.NoError || recoveredBid != msg.sender)
             revert InvalidBidSignature(recoveredBid, msg.sender);
 
         // ── L119: bid intentId matches computed digest ────────────────────────

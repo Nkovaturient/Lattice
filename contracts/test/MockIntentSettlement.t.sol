@@ -278,6 +278,38 @@ contract MockIntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
     }
 
+    function test_RevertMalformedIntentSignature() public {
+        MockIntentSettlement.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        MockIntentSettlement.Bid memory bid = _makeBid(intent);
+        bytes memory bSig = _signBid(bid);
+        bytes memory badSig = new bytes(64);
+
+        vm.prank(solver);
+        vm.expectRevert(
+            abi.encodeWithSelector(MockIntentSettlement.InvalidIntentSignature.selector, address(0), intent.user)
+        );
+        settlement.settle(intent, badSig, bid, bSig);
+    }
+
+    function test_RevertMalformedBidSignature() public {
+        MockIntentSettlement.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent);
+        MockIntentSettlement.Bid memory bid = _makeBid(intent);
+        bytes memory badSig = new bytes(64);
+
+        vm.prank(solver);
+        vm.expectRevert(
+            abi.encodeWithSelector(MockIntentSettlement.InvalidBidSignature.selector, address(0), solver)
+        );
+        settlement.settle(intent, iSig, bid, badSig);
+    }
+
     function test_RevertPreferredSolverBypass() public {
         address other = makeAddr("other");
         MockIntentSettlement.Intent memory intent = _makeIntent();
