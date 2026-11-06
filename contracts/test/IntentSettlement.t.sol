@@ -376,6 +376,56 @@ contract IntentSettlementTest is Test {
         assertEq(MockSwapRouter(settlement.SWAP_ROUTER()).lastAmountOutMinimum(), bid.outputAmount);
     }
 
+    function test_FeeSplit_FillAtExactBidPaysFullBidToUser() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        // Exact fill at bid.outputAmount (0.42 WETH) -> 0 solver fee, user receives full 0.42 WETH
+        MockSwapRouter(settlement.SWAP_ROUTER()).setFixedOutput(bid.outputAmount);
+
+        uint256 userWethBefore = weth.balanceOf(user);
+        uint256 solverWethBefore = weth.balanceOf(solver);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        assertEq(weth.balanceOf(user) - userWethBefore, bid.outputAmount);
+        assertEq(weth.balanceOf(solver) - solverWethBefore, 0);
+    }
+
+    function test_FeeSplit_SurplusAboveBidPaysSolverFivePercent() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        // MockSwapRouter default returns 110% of bid.outputAmount (0.462 WETH)
+        uint256 expectedActual = bid.outputAmount * 110 / 100;
+        uint256 expectedFee = ((expectedActual - bid.outputAmount) * settlement.SOLVER_FEE_BPS()) / settlement.BPS_DENOMINATOR();
+        uint256 expectedUser = expectedActual - expectedFee;
+
+        uint256 userWethBefore = weth.balanceOf(user);
+        uint256 solverWethBefore = weth.balanceOf(solver);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        assertEq(weth.balanceOf(user) - userWethBefore, expectedUser);
+        assertEq(weth.balanceOf(solver) - solverWethBefore, expectedFee);
+    }
+
     function test_RevertIfSwapOutputBelowBid() public {
         vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
 

@@ -37,8 +37,8 @@ contract IntentSettlement is ReentrancyGuard {
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     // Protocol fee: solver earns SOLVER_FEE_BPS basis points of output surplus
-    // Surplus = actualOutput - minOutputAmount
-    uint256 public constant SOLVER_FEE_BPS = 500; // 5% of surplus
+    // Surplus = actualOutput - bid.outputAmount
+    uint256 public constant SOLVER_FEE_BPS = 500; // 5% of surplus above bid
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
     // Uniswap v3 SwapRouter (same address Arbitrum mainnet + Sepolia)
@@ -157,7 +157,7 @@ contract IntentSettlement is ReentrancyGuard {
 
         require(actualOutput >= bid.outputAmount, "Output below bid");
 
-        (uint256 userGets, uint256 solverFee) = _feeSplit(actualOutput, intent.minOutputAmount);
+        (uint256 userGets, uint256 solverFee) = _feeSplit(actualOutput, bid.outputAmount);
 
         registry.recordFill(msg.sender);
 
@@ -179,12 +179,12 @@ contract IntentSettlement is ReentrancyGuard {
 
     // ── Internal ──────────────────────────────────────────────────────────────
 
-    function _feeSplit(uint256 actualOutput, uint256 minOutputAmount)
+    function _feeSplit(uint256 actualOutput, uint256 bidOutputAmount)
         private
         pure
         returns (uint256 userGets, uint256 solverFee)
     {
-        uint256 surplus = actualOutput - minOutputAmount;
+        uint256 surplus = actualOutput - bidOutputAmount;
         solverFee = (surplus * SOLVER_FEE_BPS) / BPS_DENOMINATOR;
         userGets = actualOutput - solverFee;
     }
