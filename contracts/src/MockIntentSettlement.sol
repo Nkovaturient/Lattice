@@ -119,6 +119,8 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
 
     // ── Events ────────────────────────────────────────────────────────────────
 
+    event NonceInvalidated(address indexed user, uint256 newNonce);
+
     event IntentSettled(
         bytes32 indexed intentId,
         address indexed solver,
@@ -165,6 +167,12 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
     {
         require(_registry != address(0), "MockIntentSettlement: zero registry");
         registry = ISolverRegistry(_registry);
+    }
+
+    function invalidateNonce() external {
+        uint256 next = nonces[msg.sender] + 1;
+        nonces[msg.sender] = next;
+        emit NonceInvalidated(msg.sender, next);
     }
 
     // ── Core settle function ──────────────────────────────────────────────────

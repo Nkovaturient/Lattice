@@ -153,6 +153,25 @@ export const IntentSettlementABI = [
         "type": "event"
     },
     {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "user",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "newNonce",
+                "type": "uint256"
+            }
+        ],
+        "name": "NonceInvalidated",
+        "type": "event"
+    },
+    {
         "inputs": [],
         "name": "BPS_DENOMINATOR",
         "outputs": [
@@ -215,6 +234,13 @@ export const IntentSettlementABI = [
             }
         ],
         "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "invalidateNonce",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function"
     },
     {

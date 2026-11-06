@@ -532,6 +532,25 @@ contract IntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
     }
 
+    function test_InvalidateNonceCancelsPendingIntent() public {
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        vm.prank(user);
+        settlement.invalidateNonce();
+        assertEq(settlement.nonces(user), 1);
+
+        vm.prank(solver);
+        vm.expectRevert("Nonce mismatch");
+        settlement.settle(intent, iSig, bid, bSig);
+        assertEq(settlement.nonces(user), 1);
+    }
+
     // ── Route validation custom error tests ───────────────────────────────
 
     function test_RevertInvalidRouteLength() public {

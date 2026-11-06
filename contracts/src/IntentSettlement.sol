@@ -76,6 +76,8 @@ contract IntentSettlement is ReentrancyGuard {
 
     event IntentExpired(bytes32 indexed intentId);
 
+    event NonceInvalidated(address indexed user, uint256 newNonce);
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     constructor(address _registry) {
@@ -175,6 +177,14 @@ contract IntentSettlement is ReentrancyGuard {
      */
     function nonces(address user) external view returns (uint256) {
         return registry.nonces(user);
+    }
+
+    /**
+     * @notice Increment caller's intent nonce, invalidating any unsettled intents signed at the prior nonce.
+     */
+    function invalidateNonce() external {
+        registry.incrementNonce(msg.sender);
+        emit NonceInvalidated(msg.sender, registry.nonces(msg.sender));
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────

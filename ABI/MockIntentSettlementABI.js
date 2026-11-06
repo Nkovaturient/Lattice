@@ -390,6 +390,25 @@ export const MockIntentSettlementABI = [
         "inputs": [
             {
                 "indexed": true,
+                "internalType": "address",
+                "name": "user",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "newNonce",
+                "type": "uint256"
+            }
+        ],
+        "name": "NonceInvalidated",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
                 "internalType": "bytes32",
                 "name": "intentId",
                 "type": "bytes32"
@@ -573,6 +592,13 @@ export const MockIntentSettlementABI = [
             }
         ],
         "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "invalidateNonce",
+        "outputs": [],
+        "stateMutability": "nonpayable",
         "type": "function"
     },
     {

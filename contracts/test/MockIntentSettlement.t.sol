@@ -117,6 +117,25 @@ contract MockIntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
     }
 
+    function test_InvalidateNonceCancelsPendingIntent() public {
+        MockIntentSettlement.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent);
+        MockIntentSettlement.Bid memory bid = _makeBid(intent);
+        bytes memory bSig = _signBid(bid);
+
+        vm.prank(user);
+        settlement.invalidateNonce();
+        assertEq(settlement.nonces(user), 1);
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(MockIntentSettlement.NonceMismatch.selector, 1, 0));
+        settlement.settle(intent, iSig, bid, bSig);
+        assertEq(settlement.nonces(user), 1);
+    }
+
     // ── Replay protection ─────────────────────────────────────────────────
 
     function test_CannotSettleTwice() public {
