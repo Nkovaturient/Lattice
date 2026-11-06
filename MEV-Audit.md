@@ -130,22 +130,20 @@ Plus 0.5 ETH = ~$1,500 at current prices. Sybil attack requires $1,500+ per fake
 
 ---
 
-### 7. Overpromise / slash griefing — HIGH (was exploitable) — MITIGATED
+### 7. Overpromise / binding quote enforcement — HIGH (was exploitable) — MITIGATED
 
-**Attack (historical):** A solver bids an inflated `outputAmount`. After settlement,
-a caller could pass an **arbitrary** `actualOutput` into `slashForOverpromise` and
-slash any solver whose bid signature was still valid — no on-chain link to the real swap output.
+**Attack (historical):** A solver bids an inflated `outputAmount` to win the off-chain auction while `settle()` only enforced `intent.minOutputAmount`, relying on a post-settlement `slashForOverpromise` call that could be replayed across non-winning quotes or front-run via `deregister()`.
 
 **Mitigation (implemented in `IntentSettlement.sol`):**
 
-- On successful settlement, the contract stores **`settlementActualOutput[intentId]`** (the swap return value) before paying the recipient and solver.
-- **`slashForOverpromise(bid, bidSig)`** — signature only; **no** caller-supplied output. The contract requires the intent to be settled and **`recorded < bid.outputAmount`** using the **stored** output. Calls **`slashOverpromise(solver)`** on the registry: if the solver still has slashable stake, behavior matches a normal stake slash; if they were already auto-deregistered (or have no stake), **`slashes` still increments** and **`SolverSlashed` emits `amount == 0`** so reputation accounting completes. **`No solver history`** reverts unknown addresses.
+- **`settle()` binds the swap to `bid.outputAmount`:** `ISwapRouter(SWAP_ROUTER).exactInput` receives `amountOutMinimum: bid.outputAmount` and `settle()` requires `actualOutput >= bid.outputAmount`. Under-delivery cannot settle on-chain, and reverting rolls back the nonce increment so the user's intent is not consumed.
+- **Post-settlement slash entry points removed:** `slashForOverpromise`, `SolverRegistry.slash`, `slashOverpromise`, and `settlementActualOutput` have been removed, eliminating the replayable slash surface and saving an `SSTORE` per settlement.
 - **`settle()`** follows **CEI** (`settled` + `incrementNonce` before the first external call), **`nonReentrant`**, and **SafeERC20** for router approval and payouts — closing reentrancy / double-settlement and odd ERC20 behavior.
-- **`ECDSA.tryRecover`** (OpenZeppelin) replaces raw `ecrecover` assembly so signatures are **non-malleable** (EIP-2) and **`slashForOverpromise`** cannot be armed with an alternate `(r, s', v')` of the same key.
+- **`ECDSA.tryRecover`** (OpenZeppelin) replaces raw `ecrecover` assembly so signatures are **non-malleable** (EIP-2).
 
 **Related (tier / auction semantics):** The signed intent fields **`preferredSolver`** and **`topicTier`** are enforced in `settle()` so they match user expectations from EIP-712.
 
-**Residual:** Failed settlements (e.g. swap reverts) still do not call `recordFill()` — repeated failures slow tier progression. Slashed wei is tracked as **`slashProceedsBalance`** and can be withdrawn via **`sweepSlashedFunds()`** by the immutable **`treasury`** address set at deploy.
+**Residual:** Failed settlements (e.g. swap reverts when pool cannot meet `bid.outputAmount`) do not call `recordFill()` — repeated failures cost the solver gas and block tier progression.
 
 ---
 
@@ -191,7 +189,7 @@ The commit-reveal scheme fits inside 80ms with room to spare.
 |---|---|
 | `libp2p/validators.js` | Added propagation jitter (0–15ms) |
 | `libp2p/commitment.js` | New: two-phase commit-reveal auction |
-| `contracts/SolverRegistry.sol` | Progressive stake tiers + fill history; `treasury` + `slashProceedsBalance` + `sweepSlashedFunds()`; `slash` + `slashOverpromise` (accounting-only overpromise when deregistered); `deregister` uses `call{value:}`; slash auto-deregister refunds residual stake |
-| `contracts/IntentSettlement.sol` | `recordFill()` on success; CEI + `nonReentrant` + SafeERC20; `settlementActualOutput`; `slashForOverpromise(bid, bidSig)`; `preferredSolver` / `topicTier`; `bid.deadline <= intent.deadline`; ERC20-only tokens |
+| `contracts/SolverRegistry.sol` | Progressive stake tiers + fill history; `treasury` + `slashProceedsBalance` + `sweepSlashedFunds()`; `deregister` uses `call{value:}` |
+| `contracts/IntentSettlement.sol` | `recordFill()` on success; CEI + `nonReentrant` + SafeERC20; binding `bid.outputAmount` floor on `SwapRouter.exactInput`; `preferredSolver` / `topicTier`; `bid.deadline <= intent.deadline`; ERC20-only tokens |
 | `contracts/foundry.toml` | OpenZeppelin remapping; `via_ir` for `settle` compilation |
 | `lib/openzeppelin-contracts` | Dependency: SafeERC20, ReentrancyGuard |

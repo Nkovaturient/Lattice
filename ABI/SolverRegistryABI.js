@@ -379,37 +379,6 @@ export const SolverRegistryABI = [
         "type": "function"
     },
     {
-        "inputs": [
-            {
-                "internalType": "address",
-                "name": "solver",
-                "type": "address"
-            },
-            {
-                "internalType": "string",
-                "name": "reason",
-                "type": "string"
-            }
-        ],
-        "name": "slash",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [
-            {
-                "internalType": "address",
-                "name": "solver",
-                "type": "address"
-            }
-        ],
-        "name": "slashOverpromise",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
         "inputs": [],
         "name": "slashProceedsBalance",
         "outputs": [

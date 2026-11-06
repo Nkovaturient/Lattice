@@ -336,29 +336,27 @@ Run all 41 tests with `forge test -v`:
 
 | Test File | Coverage |
 |---|---|
-| `IntentSettlement.t.sol` (27 tests) | Nonce passthrough, nonce increment, nonce mismatch, route validation errors, replay, deadlines, tier, preferred solver, slash mechanics |
+| `IntentSettlement.t.sol` (25 tests) | Nonce passthrough, nonce increment, nonce mismatch, route validation errors, replay, deadlines, tier, preferred solver, binding bid output enforcement |
 | `MockIntentSettlement.t.sol` (14 tests) | Same validation matrix on the mock — nonce local storage, route errors, registration, tier, bid floor |
 
 Key test categories:
 - **Nonce:** `test_NoncePassthroughMatchesRegistry`, `test_NonceIncrementAfterSettle`, `test_RevertNonceMismatch`
 - **Route validation:** `test_RevertInvalidRouteLength`, `test_RevertRouteInputTokenMismatch`, `test_RevertRouteOutputTokenMismatch`, `test_TwoHopRouteValid`
 - **Replay:** `test_CannotSettleTwice`
-- **Slash:** `test_SettleRecordsOutputAndSlashForOverpromise`, `test_SlashForOverpromise_AfterPriorSlashAutoDeregister`, `test_CallbackTokenCannotSlashDuringSettle`
+- **Binding bid & reentrancy:** `test_SettleEnforcesBidOutputMinimumOnRouter`, `test_RevertIfSwapOutputBelowBid`, `test_CallbackTokenCannotReenterSettle`
 
 ---
 
 ## Security Notes
 
 - `SolverRegistry.settlementContract` is `immutable` — changing it requires redeployment
-- `slash()` / `slashOverpromise()` are callable only by `IntentSettlement` — no admin grief vector; overpromise uses `slashOverpromise` so a solver who is already deregistered still gets `slashes++` and `SolverSlashed(..., 0, "overpromise")` when no stake remains to seize
-- `settle()` uses per-user nonces and marks `settled[intentId]` **before** the first external call (CEI); the function is `nonReentrant` (OpenZeppelin `ReentrancyGuard`) to block reentrant double-settlement. `slashForOverpromise` (`IntentSettlement.sol` line 204) uses the same guard, so a callback token cannot slash while `settlementActualOutput` is still unset
+- `settle()` enforces the solver's signed **`bid.outputAmount`** directly as the Uniswap v3 `amountOutMinimum` and post-swap floor (`require(actualOutput >= bid.outputAmount, "Output below bid")`), eliminating post-settlement overpromise slashing and its replay surface
+- `settle()` uses per-user nonces and marks `settled[intentId]` **before** the first external call (CEI); the function is `nonReentrant` (OpenZeppelin `ReentrancyGuard`) to block reentrant double-settlement
 - Signed intent fields **`preferredSolver`** and **`topicTier`** are enforced on-chain (`address(0)` preferred solver means open auction; `topicTier` requires `registry.solverTier(msg.sender) >= intent.topicTier`)
 - ERC20 paths use **`SafeERC20`** (`safeTransfer` / `safeTransferFrom`, `forceApprove` to the SwapRouter, allowance cleared to zero after the swap)
 - EIP-712 signature checks use **OpenZeppelin `ECDSA.tryRecover`** (not raw `ecrecover`): rejects **malleable** signatures (EIP-2 `s` range, `v` ∈ {27,28}) and does not treat a failed recovery as a match when `expected` is `address(0)`
-- **`slashForOverpromise(bid, bidSig)`** — no third argument. Slashing compares the bid’s `outputAmount` to **`settlementActualOutput[intentId]`** written at successful settlement, so callers cannot inject a fake “actual output”
 - **`deregister()`** returns stake with **`call{value:}`** (not `transfer`) so smart-wallet solvers are not bricked
-- If a slash leaves stake below the tier minimum, the registry **auto-deregisters** and **`call`s the residual stake** back to the solver (avoids locked ETH)
-- **`SolverRegistry`** is deployed as `new SolverRegistry(predictedSettlement, treasury)` — each **`SLASH_AMOUNT`** increments **`slashProceedsBalance`**; **`sweepSlashedFunds()`** ( **`treasury` only** ) sends that balance to **`treasury`**. `treasury` is immutable. On Arbitrum One (`ARBITRUM_ONE`, chain id 42161) the constructor requires a contract, so mainnet must be given a Safe via `TREASURY_ADDRESS`. Sepolia can still use the deployer EOA
+- **`SolverRegistry`** is deployed as `new SolverRegistry(predictedSettlement, treasury)` — **`sweepSlashedFunds()`** ( **`treasury` only** ) sends `slashProceedsBalance` to **`treasury`**. `treasury` is immutable. On Arbitrum One (`ARBITRUM_ONE`, chain id 42161) the constructor requires a contract, so mainnet must be given a Safe via `TREASURY_ADDRESS`. Sepolia can still use the deployer EOA
 - **`settle()`** requires **`bid.deadline <= intent.deadline`** and **`inputToken` / `outputToken` ≠ `address(0)`** (v1 is ERC20-only; use WETH for ETH — see `IntentTypes`)
 - Run full Slither audit before mainnet deployment
 

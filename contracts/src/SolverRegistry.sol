@@ -145,55 +145,6 @@ contract SolverRegistry {
         emit FillRecorded(solver, solvers[solver].fills);
     }
 
-    /// @dev Stake slash when the solver is still registered with enough stake (generic protocol slash).
-    function slash(address solver, string calldata reason) external {
-        require(msg.sender == settlementContract, "Only settlement");
-        SolverInfo storage s = solvers[solver];
-        require(s.registered, "Not registered");
-        require(s.stake >= SLASH_AMOUNT, "Insufficient stake");
-        _executeStakeSlash(solver, s, reason);
-    }
-
-    /**
-     * @dev Overpromise slash: same as `slash` when stake is available; if the solver was already
-     *      deregistered (e.g. prior slash) or has no slashable stake, still increments `slashes` and
-     *      emits `SolverSlashed` with `amount == 0` so reputation accounting completes.
-     * @notice Requires prior on-chain activity (`fills`, `slashes`, or currently `registered`).
-     */
-    function slashOverpromise(address solver) external {
-        require(msg.sender == settlementContract, "Only settlement");
-        SolverInfo storage s = solvers[solver];
-        require(s.fills > 0 || s.slashes > 0 || s.registered, "No solver history");
-
-        if (s.registered && s.stake >= SLASH_AMOUNT) {
-            _executeStakeSlash(solver, s, "overpromise");
-        } else {
-            s.slashes += 1;
-            emit SolverSlashed(solver, 0, "overpromise");
-        }
-    }
-
-    function _executeStakeSlash(address solver, SolverInfo storage s, string memory reason) private {
-        s.stake -= SLASH_AMOUNT;
-        slashProceedsBalance += SLASH_AMOUNT;
-        s.slashes += 1;
-
-        uint256 minStake = s.tier == 1 ? TIER1_MIN_STAKE : TIER0_MIN_STAKE;
-        if (s.stake < minStake) {
-            string memory pid = s.peerId;
-            delete peerIdToAddress[pid];
-            uint256 refund = s.stake;
-            s.registered = false;
-            s.tier = 0;
-            s.stake = 0;
-            s.peerId = "";
-            (bool ok,) = payable(solver).call{value: refund}("");
-            require(ok, "Stake refund failed");
-        }
-
-        emit SolverSlashed(solver, SLASH_AMOUNT, reason);
-    }
-
     function incrementNonce(address user) external {
         require(msg.sender == settlementContract, "Only settlement");
         nonces[user]++;

@@ -7,3 +7,4 @@ node_modules/
 /scripts/run-mesh.js
 /scripts/demo.js
 /scripts/benchmark.js
+contracts/audits/

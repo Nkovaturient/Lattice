@@ -39,15 +39,18 @@ interface ISwapRouterTest {
     }
 }
 
-// Input token that tries to slash the solver from inside transferFrom.
-contract CallbackSlashToken {
+// Input token that tries to re-enter settle() from inside transferFrom.
+contract CallbackReenterSettleToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
     IntentSettlement settlement;
+    IntentTypes.Intent intent;
+    bytes intentSig;
     IntentTypes.Bid bid;
     bytes bidSig;
     bool armed;
+    bool public reentrancyBlocked;
 
     function mint(address to, uint256 amt) external { balanceOf[to] += amt; }
 
@@ -56,10 +59,18 @@ contract CallbackSlashToken {
         return true;
     }
 
-    function arm(IntentSettlement s, IntentTypes.Bid calldata b, bytes calldata sig) external {
+    function arm(
+        IntentSettlement s,
+        IntentTypes.Intent calldata i,
+        bytes calldata iSig,
+        IntentTypes.Bid calldata b,
+        bytes calldata bSig
+    ) external {
         settlement = s;
+        intent = i;
+        intentSig = iSig;
         bid = b;
-        bidSig = sig;
+        bidSig = bSig;
         armed = true;
     }
 
@@ -73,7 +84,11 @@ contract CallbackSlashToken {
     function transferFrom(address from, address to, uint256 amt) external returns (bool) {
         if (armed) {
             armed = false;
-            try settlement.slashForOverpromise(bid, bidSig) {} catch {}
+            try settlement.settle(intent, intentSig, bid, bidSig) {
+                reentrancyBlocked = false;
+            } catch {
+                reentrancyBlocked = true;
+            }
         }
         require(allowance[from][msg.sender] >= amt, "allowance");
         require(balanceOf[from] >= amt, "balance");
@@ -84,15 +99,23 @@ contract CallbackSlashToken {
     }
 }
 
-// SwapRouter stub — mints output to recipient (simulates swap); returns min + 10%
+// SwapRouter stub — mints output to recipient (simulates swap); returns fixedOutput if set, else min + 10%
 contract MockSwapRouter {
+    uint256 public fixedOutput;
+    uint256 public lastAmountOutMinimum;
+
+    function setFixedOutput(uint256 out) external {
+        fixedOutput = out;
+    }
+
     function exactInput(ISwapRouterTest.ExactInputParams calldata p)
         external
         payable
         returns (uint256)
     {
         require(p.path.length >= 43, "path");
-        uint256 out = p.amountOutMinimum * 110 / 100;
+        lastAmountOutMinimum = p.amountOutMinimum;
+        uint256 out = fixedOutput > 0 ? fixedOutput : (p.amountOutMinimum * 110 / 100);
         address tokenOut = address(uint160(bytes20(p.path[p.path.length - 20:])));
         MockERC20(tokenOut).mint(p.recipient, out);
         return out;
@@ -249,23 +272,6 @@ contract IntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
     }
 
-    function test_SolverSlash() public {
-        uint256 stakeBefore = registry.stake(solver);
-        uint256 balBefore = solver.balance;
-        vm.prank(address(settlement));
-        registry.slash(solver, "overpromise");
-        // Tier-0 min 0.05 ETH; after 0.01 slash, 0.04 < 0.05 → auto-deregister + residual returned
-        assertFalse(registry.isRegistered(solver));
-        assertEq(registry.stake(solver), 0);
-        assertEq(stakeBefore - registry.SLASH_AMOUNT(), solver.balance - balBefore);
-        assertEq(registry.slashProceedsBalance(), registry.SLASH_AMOUNT());
-        uint256 tBefore = treasury.balance;
-        vm.prank(treasury);
-        registry.sweepSlashedFunds();
-        assertEq(treasury.balance - tBefore, registry.SLASH_AMOUNT());
-        assertEq(registry.slashProceedsBalance(), 0);
-    }
-
     function test_SolverDeregister() public {
         uint256 balBefore = solver.balance;
         vm.prank(solver);
@@ -317,7 +323,7 @@ contract IntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
     }
 
-    function test_SettleRecordsOutputAndSlashForOverpromise() public {
+    function test_SettleEnforcesBidOutputMinimumOnRouter() public {
         vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
 
         IntentTypes.Intent memory intent = _makeIntent();
@@ -332,103 +338,59 @@ contract IntentSettlementTest is Test {
         vm.prank(solver);
         settlement.settle(intent, iSig, bid, bSig);
 
+        assertEq(MockSwapRouter(settlement.SWAP_ROUTER()).lastAmountOutMinimum(), bid.outputAmount);
+    }
+
+    function test_RevertIfSwapOutputBelowBid() public {
+        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
+
+        IntentTypes.Intent memory intent = _makeIntent();
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent, userPK);
+        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
+        bid.outputAmount = 500_000_000_000_000_000;
+        bytes memory bSig = _signBid(bid, solverPK);
+
+        // Router returns 0.45 WETH: above intent.minOutputAmount (0.40 WETH) but below bid.outputAmount (0.50 WETH)
+        MockSwapRouter(settlement.SWAP_ROUTER()).setFixedOutput(450_000_000_000_000_000);
+
+        vm.prank(solver);
+        vm.expectRevert("Output below bid");
+        settlement.settle(intent, iSig, bid, bSig);
+
+        // Failed quote must not consume user's intent nonce or mark settled
+        assertEq(settlement.nonces(user), 0);
         bytes32 intentId = keccak256(
             abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), IntentTypes.hashIntent(intent))
         );
-        assertTrue(settlement.settled(intentId));
-        uint256 recorded = settlement.settlementActualOutput(intentId);
-        assertGt(recorded, 0);
-
-        IntentTypes.Bid memory noSlashBid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
-        noSlashBid.outputAmount = recorded;
-        bytes memory noSlashSig = _signBid(noSlashBid, solverPK);
-        vm.expectRevert("No overpromise to slash");
-        settlement.slashForOverpromise(noSlashBid, noSlashSig);
-
-        IntentTypes.Bid memory slashBid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
-        slashBid.outputAmount = recorded + 1;
-        bytes memory slashSig = _signBid(slashBid, solverPK);
-
-        uint256 stakeBefore = registry.stake(solver);
-        settlement.slashForOverpromise(slashBid, slashSig);
-        assertLt(registry.stake(solver), stakeBefore);
+        assertFalse(settlement.settled(intentId));
     }
 
-    function test_CallbackTokenCannotSlashDuringSettle() public {
+    function test_CallbackTokenCannotReenterSettle() public {
         vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
 
-        CallbackSlashToken input = new CallbackSlashToken();
-        input.mint(user, 1_000_000_000);
+        CallbackReenterSettleToken input = new CallbackReenterSettleToken();
+        input.mint(user, 2_000_000_000);
 
         IntentTypes.Intent memory intent = _makeIntent();
         intent.inputToken = address(input);
 
         vm.prank(user);
-        input.approve(address(settlement), intent.inputAmount);
+        input.approve(address(settlement), intent.inputAmount * 2);
 
         bytes memory iSig = _signIntent(intent, userPK);
         IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
         bid.outputAmount = 500_000_000_000_000_000;
         bytes memory bSig = _signBid(bid, solverPK);
-        input.arm(settlement, bid, bSig);
-
-        uint256 stakeBefore = registry.stake(solver);
-        vm.prank(solver);
-        settlement.settle(intent, iSig, bid, bSig);
-
-        assertEq(registry.stake(solver), stakeBefore);
-        assertEq(registry.slashProceedsBalance(), 0);
-        bytes32 intentId = keccak256(
-            abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), IntentTypes.hashIntent(intent))
-        );
-        assertGt(settlement.settlementActualOutput(intentId), 0);
-    }
-
-    function test_SlashForOverpromise_AfterPriorSlashAutoDeregister() public {
-        vm.etch(settlement.SWAP_ROUTER(), address(new MockSwapRouter()).code);
-
-        IntentTypes.Intent memory intent = _makeIntent();
-        vm.prank(user);
-        usdc.approve(address(settlement), intent.inputAmount);
-
-        bytes memory iSig = _signIntent(intent, userPK);
-        IntentTypes.Bid memory bid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
-        bid.outputAmount = 500_000_000_000_000_000;
-        bytes memory bSig = _signBid(bid, solverPK);
+        input.arm(settlement, intent, iSig, bid, bSig);
 
         vm.prank(solver);
         settlement.settle(intent, iSig, bid, bSig);
 
-        uint256 recorded = settlement.settlementActualOutput(
-            keccak256(
-                abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), IntentTypes.hashIntent(intent))
-            )
-        );
-
-        vm.prank(address(settlement));
-        registry.slash(solver, "prior");
-        assertFalse(registry.isRegistered(solver));
-
-        (, , , , uint256 slashesAfterPrior,) = registry.solvers(solver);
-        assertEq(slashesAfterPrior, 1);
-
-        uint256 proceedsBefore = registry.slashProceedsBalance();
-
-        IntentTypes.Bid memory slashBid = _makeBid(intent, settlement.DOMAIN_SEPARATOR());
-        slashBid.outputAmount = recorded + 1;
-        bytes memory slashSig = _signBid(slashBid, solverPK);
-
-        settlement.slashForOverpromise(slashBid, slashSig);
-
-        (, , , , uint256 slashesAfterOverpromise,) = registry.solvers(solver);
-        assertEq(slashesAfterOverpromise, slashesAfterPrior + 1);
-        assertEq(registry.slashProceedsBalance(), proceedsBefore);
-    }
-
-    function test_SlashOverpromise_RevertNoSolverHistory() public {
-        vm.prank(address(settlement));
-        vm.expectRevert("No solver history");
-        registry.slashOverpromise(makeAddr("random"));
+        assertTrue(input.reentrancyBlocked());
+        assertEq(settlement.nonces(user), 1);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────

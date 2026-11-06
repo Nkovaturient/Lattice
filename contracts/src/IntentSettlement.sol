@@ -52,9 +52,6 @@ contract IntentSettlement is ReentrancyGuard {
     // Replay protection: intentId → settled
     mapping(bytes32 => bool) public settled;
 
-    /// @dev Actual output token amount from the swap, recorded for on-chain overpromise checks.
-    mapping(bytes32 => uint256) public settlementActualOutput;
-
     // ── Custom errors ─────────────────────────────────────────────────────────
 
     /// Route bytes are not a valid packed Uniswap v3 path (must be 43 + 23*n bytes).
@@ -154,29 +151,17 @@ contract IntentSettlement is ReentrancyGuard {
                 recipient: address(this),
                 deadline: bid.deadline,
                 amountIn: intent.inputAmount,
-                amountOutMinimum: intent.minOutputAmount
+                amountOutMinimum: bid.outputAmount
             })
         );
 
-        require(actualOutput >= intent.minOutputAmount, "Output below minimum");
+        require(actualOutput >= bid.outputAmount, "Output below bid");
 
         (uint256 userGets, uint256 solverFee) = _feeSplit(actualOutput, intent.minOutputAmount);
 
-        // Record before outbound transfers (CEI) — binds slashForOverpromise to on-chain truth
-        settlementActualOutput[intentId] = actualOutput;
         registry.recordFill(msg.sender);
 
-        _payOutputsAndCleanup(
-            IERC20(intent.outputToken),
-            intent.recipient,
-            intent.inputToken,
-            userGets,
-            solverFee,
-            intentId,
-            intent.user,
-            intent.inputAmount,
-            actualOutput
-        );
+        _payOutputsAndCleanup(intent, intentId, userGets, solverFee, actualOutput);
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -192,27 +177,6 @@ contract IntentSettlement is ReentrancyGuard {
         return registry.nonces(user);
     }
 
-    // ── Slash helpers ─────────────────────────────────────────────────────────
-
-    /**
-     * Slash a solver who bid outputAmount above what settlement produced.
-     * Uses the output amount recorded at settlement time — callers cannot inject a fake actualOutput.
-     * Uses `slashOverpromise` so deregistered solvers (e.g. after an earlier auto-slash) still get
-     * `slashes` / events when no stake remains to take.
-     * Shares `settle`'s reentrancy guard so a callback token cannot slash while `settlementActualOutput` is still unset.
-     */
-    function slashForOverpromise(IntentTypes.Bid calldata bid, bytes calldata bidSig) external nonReentrant {
-        bytes32 bidHash = _domainHash(bid.hashBid());
-        require(_verifySignature(bidHash, bidSig, bid.solver), "Invalid bid signature");
-
-        bytes32 intentId = bid.intentId;
-        require(settled[intentId], "Intent not settled");
-        uint256 recorded = settlementActualOutput[intentId];
-        require(recorded < bid.outputAmount, "No overpromise to slash");
-
-        registry.slashOverpromise(bid.solver);
-    }
-
     // ── Internal ──────────────────────────────────────────────────────────────
 
     function _feeSplit(uint256 actualOutput, uint256 minOutputAmount)
@@ -226,20 +190,17 @@ contract IntentSettlement is ReentrancyGuard {
     }
 
     function _payOutputsAndCleanup(
-        IERC20 outputToken,
-        address recipient,
-        address inputToken,
+        IntentTypes.Intent calldata intent,
+        bytes32 intentId,
         uint256 userGets,
         uint256 solverFee,
-        bytes32 intentId,
-        address user,
-        uint256 inputAmount,
         uint256 actualOutput
     ) private {
-        outputToken.safeTransfer(recipient, userGets);
+        IERC20 outputToken = IERC20(intent.outputToken);
+        outputToken.safeTransfer(intent.recipient, userGets);
         outputToken.safeTransfer(msg.sender, solverFee);
-        IERC20(inputToken).forceApprove(SWAP_ROUTER, 0);
-        emit IntentSettled(intentId, user, msg.sender, inputAmount, actualOutput, solverFee);
+        IERC20(intent.inputToken).forceApprove(SWAP_ROUTER, 0);
+        emit IntentSettled(intentId, intent.user, msg.sender, intent.inputAmount, actualOutput, solverFee);
     }
 
     /**
