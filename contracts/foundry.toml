@@ -19,5 +19,5 @@ arb_sepolia    = "${ARB_SEPOLIA_RPC}"
 arb_mainnet    = "${ARB_MAINNET_RPC}"
 
 [etherscan]
-arb_sepolia  = { key = "${ARBISCAN_API_KEY}", url = "https://sepolia-rollup.arbitrum.io/rpc" }
-arb_mainnet  = { key = "${ARBISCAN_API_KEY}", url = "https://rpc.ankr.com/arbitrum/b9d65a15e8825e0d8ddb7c2a8baad5a51a9786a01b564f600fb131ae074b0130" }
+arb_sepolia  = { key = "${ARBISCAN_API_KEY}", url = "https://api-sepolia.arbiscan.io/api" }
+arb_mainnet  = { key = "${ARBISCAN_API_KEY}", url = "https://api.arbiscan.io/api" }
