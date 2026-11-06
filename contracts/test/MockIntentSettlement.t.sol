@@ -154,6 +154,24 @@ contract MockIntentSettlementTest is Test {
         settlement.settle(intent, iSig, bid, bSig);
     }
 
+    function test_SettleAtExactDeadlineBoundarySucceeds() public {
+        MockIntentSettlement.Intent memory intent = _makeIntent();
+        intent.deadline = uint64(block.timestamp);
+
+        vm.prank(user);
+        usdc.approve(address(settlement), intent.inputAmount);
+
+        bytes memory iSig = _signIntent(intent);
+        MockIntentSettlement.Bid memory bid = _makeBid(intent);
+        bid.deadline = uint64(block.timestamp);
+        bytes memory bSig = _signBid(bid);
+
+        vm.prank(solver);
+        settlement.settle(intent, iSig, bid, bSig);
+
+        assertTrue(settlement.settled(_intentId(intent)));
+    }
+
     function test_RevertBidExceedsIntentDeadline() public {
         MockIntentSettlement.Intent memory intent = _makeIntent();
         bytes memory iSig = _signIntent(intent);

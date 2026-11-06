@@ -199,11 +199,11 @@ contract MockIntentSettlement is EIP712, ReentrancyGuard {
 
         // ── L104: intent deadline ─────────────────────────────────────────────
         // solidity's block.timestamp has ~12s granularity on L2s; fine for 10min intents.
-        if (block.timestamp >= intent.deadline)
+        if (block.timestamp > intent.deadline)
             revert IntentExpired(intent.deadline, block.timestamp);
 
         // ── L105 + L106: bid deadline ─────────────────────────────────────────
-        if (block.timestamp >= bid.deadline)
+        if (block.timestamp > bid.deadline)
             revert BidExpired(bid.deadline, block.timestamp);
         if (bid.deadline > intent.deadline)
             revert BidExceedsIntentDeadline(bid.deadline, intent.deadline);
