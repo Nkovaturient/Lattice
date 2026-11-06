@@ -46,7 +46,10 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
 
 # DEMO
 
-[Watch Demo](https://teal-secondary-antelope-34.mypinata.cloud/ipfs/bafybeief2j7zoo4dw4czinwzaumgfyzahwex5vjmny2a4gbrpcfidmgohe)
+<!--old [Watch Demo](https://teal-secondary-antelope-34.mypinata.cloud/ipfs/bafybeief2j7zoo4dw4czinwzaumgfyzahwex5vjmny2a4gbrpcfidmgohe) -->
+
+[Lattice Demo](https://www.loom.com/share/4de26082a5fa42618fb46853baf4c6d5)
+
 
 > The demo runs three local node processes (two workers and a coordinator) plus a user script against **Arbitrum One**. The user signs an EIP-712 intent, the mesh runs a sealed commit-reveal auction, and the winning solver submits `settle()` through Uniswap v3. Every step is logged in the terminal, ending in an Arbiscan tx link.
 
