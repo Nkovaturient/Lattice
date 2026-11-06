@@ -36,11 +36,14 @@ contract SolverRegistry {
     mapping(address => SolverInfo) public solvers;
     mapping(address => uint256) public nonces; // user intent nonces
     mapping(string => address) public peerIdToAddress;
+    /// @dev Stake credited on deregistration — claimable via `withdraw()`.
+    mapping(address => uint256) public pendingWithdrawals;
 
     // ── Events ────────────────────────────────────────────────────────────────
     event SolverRegistered(address indexed solver, string peerId, uint8 tier);
     event SolverUpgraded(address indexed solver, uint8 fromTier, uint8 toTier);
     event SolverDeregistered(address indexed solver);
+    event StakeWithdrawn(address indexed solver, uint256 amount);
     event SolverSlashed(address indexed solver, uint256 amount, string reason);
     event FillRecorded(address indexed solver, uint256 totalFills);
     event SlashedFundsSwept(address indexed treasury, uint256 amount);
@@ -114,10 +117,20 @@ contract SolverRegistry {
         s.tier = 0;
         s.peerId = "";
 
+        pendingWithdrawals[msg.sender] += amount;
+
+        emit SolverDeregistered(msg.sender);
+    }
+
+    function withdraw() external {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "Nothing to withdraw");
+        pendingWithdrawals[msg.sender] = 0;
+
         (bool ok,) = payable(msg.sender).call{value: amount}("");
         require(ok, "ETH transfer failed");
 
-        emit SolverDeregistered(msg.sender);
+        emit StakeWithdrawn(msg.sender, amount);
     }
 
     function topUpStake() external payable {

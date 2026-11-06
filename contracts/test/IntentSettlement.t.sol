@@ -99,6 +99,13 @@ contract CallbackReenterSettleToken {
     }
 }
 
+// Solver contract whose receive() always reverts.
+contract RevertingSolver {
+    receive() external payable {
+        revert("Reject ETH");
+    }
+}
+
 // SwapRouter stub — mints output to recipient (simulates swap); returns fixedOutput if set, else min + 10%
 contract MockSwapRouter {
     uint256 public fixedOutput;
@@ -274,11 +281,39 @@ contract IntentSettlementTest is Test {
 
     function test_SolverDeregister() public {
         uint256 balBefore = solver.balance;
+        uint256 staked = registry.stake(solver);
         vm.prank(solver);
         registry.deregister();
         assertFalse(registry.isRegistered(solver));
-        assertGt(solver.balance, balBefore, "Stake not returned");
         assertEq(registry.peerIdToAddress("12D3KooWTestPeerId"), address(0));
+        assertEq(registry.pendingWithdrawals(solver), staked);
+
+        vm.prank(solver);
+        registry.withdraw();
+        assertEq(registry.pendingWithdrawals(solver), 0);
+        assertEq(solver.balance - balBefore, staked, "Stake not returned");
+    }
+
+    function test_SolverDeregister_RevertingReceiverCanExit() public {
+        RevertingSolver badSolver = new RevertingSolver();
+        uint256 minStake = registry.MIN_STAKE();
+        vm.deal(address(badSolver), minStake);
+
+        vm.prank(address(badSolver));
+        registry.register{value: minStake}("12D3KooWRevertingPeer", 0);
+        assertTrue(registry.isRegistered(address(badSolver)));
+
+        vm.prank(address(badSolver));
+        registry.deregister();
+
+        assertFalse(registry.isRegistered(address(badSolver)));
+        assertEq(registry.peerIdToAddress("12D3KooWRevertingPeer"), address(0));
+        assertEq(registry.pendingWithdrawals(address(badSolver)), minStake);
+
+        vm.prank(address(badSolver));
+        vm.expectRevert("ETH transfer failed");
+        registry.withdraw();
+        assertEq(registry.pendingWithdrawals(address(badSolver)), minStake);
     }
 
     function test_FuzzIntentHash(address u, uint256 amt) public pure {
