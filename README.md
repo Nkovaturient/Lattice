@@ -50,6 +50,8 @@ Users sign what they want. Solvers compete **privately** to fill it. The best so
 
 > The demo runs three local node processes (two workers and a coordinator) plus a user script against **Arbitrum One**. The user signs an EIP-712 intent, the mesh runs a sealed commit-reveal auction, and the winning solver submits `settle()` through Uniswap v3. Every step is logged in the terminal, ending in an Arbiscan tx link.
 
+**Mainnet settle:** [`0x66fdef7c…cb4f1`](https://arbiscan.io/tx/0x66fdef7cb26c6e2f603b4590c3776854b1b5ec45e3a7c4e57f18322ce12cb4f1#statechange) — USDC in, WETH out, at or above the signed bid.
+
 <div align="center">
   <table>
     <tr>
@@ -174,6 +176,7 @@ Pre-warmed libp2p connections reduce dial time from ~50ms cold to ~2ms. Measured
 | Tier-1 stake | 0.5 ETH and 10 fills |
 | Solver fee | 5% of surplus above the signed bid (`SOLVER_FEE_BPS = 500`) |
 | Swap floor | `amountOutMinimum = bid.outputAmount` |
+| Mainnet settle | [`0x66fdef7c…cb4f1`](https://arbiscan.io/tx/0x66fdef7cb26c6e2f603b4590c3776854b1b5ec45e3a7c4e57f18322ce12cb4f1#statechange) |
 
 How the contracts behave:
 
